@@ -242,4 +242,4 @@ DEBUG=true
 
 ## 许可证
 
-MIT License
+LGPL-3.0
