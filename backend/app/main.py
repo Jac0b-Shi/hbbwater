@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import Base, engine
+from app.database import Base, DATABASE_DIALECT, engine, should_auto_create_schema
 from app.routers import sensors, alerts, dashboard, config, account
 from app.services.schema import ensure_runtime_schema
 
@@ -17,7 +17,8 @@ async def lifespan(app: FastAPI):
     # Startup
     print(f"[{datetime.utcnow()}] Flood Monitoring API starting up...")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        if should_auto_create_schema(DATABASE_DIALECT):
+            await conn.run_sync(Base.metadata.create_all)
         await ensure_runtime_schema(conn)
     yield
     # Shutdown

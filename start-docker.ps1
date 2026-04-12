@@ -53,6 +53,17 @@ if (!(Test-Path "$PROJECT_DIR\.env")) {
     Write-Success "已创建 .env 文件"
 }
 
+$envContent = Get-Content "$PROJECT_DIR\.env" -ErrorAction SilentlyContinue
+$hostHttpPort = "80"
+foreach ($line in $envContent) {
+    if ($line -match '^\s*HOST_HTTP_PORT\s*=\s*(.+?)\s*$') {
+        $hostHttpPort = $matches[1].Trim()
+        break
+    }
+}
+
+$siteUrl = if ($hostHttpPort -eq "80") { "http://localhost" } else { "http://localhost:$hostHttpPort" }
+
 # 创建必要的目录
 if (!(Test-Path "$PROJECT_DIR\logs")) {
     New-Item -ItemType Directory -Path "$PROJECT_DIR\logs" -Force | Out-Null
@@ -72,7 +83,7 @@ try {
         Write-Success "========================================"
         Write-Output ""
         Write-Output "访问地址:"
-        Write-Output "  • 主站点:      http://localhost"
+        Write-Output "  • 主站点:      $siteUrl"
         Write-Output "  • API 文档:    http://localhost:8000/docs"
         Write-Output "  • Webhook:     http://localhost:8080/webhook/sensor"
         Write-Output ""
@@ -81,6 +92,10 @@ try {
         Write-Output ""
         Write-Output "停止服务:"
         Write-Output "  .\stop-docker.ps1"
+        if ($hostHttpPort -ne "80") {
+            Write-Output ""
+            Write-Warning "当前主站点使用自定义端口 $hostHttpPort。"
+        }
     } else {
         Write-Error "服务启动失败"
     }

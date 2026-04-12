@@ -24,6 +24,9 @@
 
 访问 http://localhost 即可使用。
 
+如果 `http://localhost` 打开后是宿主机上其他服务的默认页（例如 Caddy 的 `Caddy works!`），
+请把 `.env` 中的 `HOST_HTTP_PORT` 改成其他端口，例如 `8081`，然后访问 `http://localhost:8081`。
+
 详见 [DOCKER.md](DOCKER.md)
 
 ## 项目结构

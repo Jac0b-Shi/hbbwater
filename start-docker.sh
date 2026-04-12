@@ -42,6 +42,14 @@ if [ ! -f "$PROJECT_DIR/.env" ]; then
     echo -e "${GREEN}已创建 .env 文件${NC}"
 fi
 
+HOST_HTTP_PORT="$(grep -E '^HOST_HTTP_PORT=' "$PROJECT_DIR/.env" | tail -n 1 | cut -d '=' -f 2-)"
+HOST_HTTP_PORT="${HOST_HTTP_PORT:-80}"
+if [ "$HOST_HTTP_PORT" = "80" ]; then
+    SITE_URL="http://localhost"
+else
+    SITE_URL="http://localhost:$HOST_HTTP_PORT"
+fi
+
 # 创建日志目录
 mkdir -p "$PROJECT_DIR/logs"
 
@@ -56,7 +64,7 @@ if $COMPOSE_CMD -f "$PROJECT_DIR/docker-compose.yml" up --build -d; then
     echo -e "${GREEN}========================================${NC}"
     echo ""
     echo "访问地址:"
-    echo "  • 主站点:      http://localhost"
+    echo "  • 主站点:      $SITE_URL"
     echo "  • API 文档:    http://localhost:8000/docs"
     echo "  • Webhook:     http://localhost:8080/webhook/sensor"
     echo ""
@@ -64,6 +72,10 @@ if $COMPOSE_CMD -f "$PROJECT_DIR/docker-compose.yml" up --build -d; then
     echo "  查看日志:    $COMPOSE_CMD logs -f"
     echo "  停止服务:    ./stop-docker.sh"
     echo "  重启服务:    $COMPOSE_CMD restart"
+    if [ "$HOST_HTTP_PORT" != "80" ]; then
+        echo ""
+        echo -e "${YELLOW}当前主站点使用自定义端口 $HOST_HTTP_PORT。${NC}"
+    fi
 else
     echo -e "${RED}服务启动失败${NC}"
     exit 1

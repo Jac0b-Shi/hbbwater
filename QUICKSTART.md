@@ -20,6 +20,14 @@
 - 🌐 **网站**: http://localhost
 - 📚 **API 文档**: http://localhost:8000/docs
 
+如果 `http://localhost` 显示的是其他程序的默认页面，请编辑 `.env`：
+
+```env
+HOST_HTTP_PORT=8081
+```
+
+然后重新启动并访问 `http://localhost:8081`。
+
 ## 停止服务
 
 ```bash
@@ -51,11 +59,11 @@
 
 **Q: 端口被占用怎么办？**
 
-A: 修改 `docker-compose.yml` 中的端口映射：
-```yaml
-ports:
-  - "8080:80"  # 将 80 改为其他端口如 8080
+A: 优先修改 `.env` 中的 `HOST_HTTP_PORT`，例如：
+```env
+HOST_HTTP_PORT=8081
 ```
+然后重新执行启动脚本。
 
 **Q: 如何修改数据库密码？**
 

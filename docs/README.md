@@ -82,8 +82,8 @@
 mysql -u root -p
 
 # 执行初始化脚本
-source /mnt/e/CodeProjects/hbbwater/database/init.sql
-source /mnt/e/CodeProjects/hbbwater/database/procedures.sql
+source /mnt/e/CodeProjects/hbbwater/database/mysql/init.sql
+source /mnt/e/CodeProjects/hbbwater/database/mysql/procedures.sql
 ```
 
 ### 2. 启动 FastAPI 后端

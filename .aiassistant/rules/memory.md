@@ -18,6 +18,18 @@ apply: 始终
 - Windows 启动脚本是 `start-docker.ps1`，停止脚本是 `stop-docker.ps1`。
 - 默认数据库名是 `flood_monitoring`，默认业务用户是 `flood_user`。
 
+## 仓库与协作约定
+
+- 远端仓库是 `https://gitee.com/Jac0b_Shi/hbbwater.git`。
+- 当前远端使用 `main` 和 `develop` 分支。
+- `main` 是稳定集成分支。
+- `develop` 是默认开发分支，后续功能修改和日常开发应优先在 `develop` 进行。
+- 只有在用户完成测试并确认没问题后，才应发起 PR 将 `develop` 合并进 `main`。
+- 仓库已提供 Gitee 模板文件：
+  - `.gitee/ISSUE_TEMPLATE.zh-CN.md`
+  - `.gitee/PULL_REQUEST_TEMPLATE.zh-CN.md`
+- 后续处理仓库协作配置时，应优先沿用 `.gitee/` 下的中文模板命名与路径。
+
 ## 后端事实
 
 - FastAPI 主入口是 `backend/app/main.py`。
@@ -63,4 +75,12 @@ apply: 始终
 - 当前项目不是 git 工作区，不能依赖 `git status` 或提交历史判断变更。
 - 写项目说明或后续记忆时，应避免把截图、临时测试产物或推测性架构信息当成事实。
 - 涉及这个项目的后续 git 提交，默认要求使用用户的 GPG 签名。
+- 当前项目许可证是 `LGPL-3.0`，对应文本位于仓库根目录 `LICENSE`。
+
+## 当前环境可直接使用的命令行工具
+
+- 用户当前通过 Scoop 安装并可直接调用以下工具：`7zip`、`bat`、`bottom`、`delta`、`duf`、`dust`、`eza`、`fd`、`fzf`、`gitui`、`glow`、`jq`、`procs`、`ripgrep`、`sd`、`tldr`、`watchexec`、`xh`、`yazi`、`zoxide`。
+- 在后续终端协作中，若任务适配，应优先直接使用这些工具，而不是退回更低效或更冗长的替代命令。
+- 其中搜索文件优先使用 `fd`，搜索文本优先使用 `ripgrep`/`rg`，查看文件优先使用 `bat`，列目录优先使用 `eza`，处理 JSON 优先使用 `jq`。
+- 涉及 HTTP 接口调试时可优先使用 `xh`；涉及目录跳转可考虑 `zoxide`；涉及交互筛选可考虑 `fzf`；涉及监控和进程观察可使用 `bottom` 与 `procs`。
 

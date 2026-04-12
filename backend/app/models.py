@@ -1,12 +1,23 @@
 """SQLAlchemy models for database tables."""
+import enum
+import json
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import (
-    Column, Integer, BigInteger, String, Text, Boolean, 
-    DECIMAL, DateTime, Date, Enum, JSON, ForeignKey, Index
+    BigInteger,
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    DECIMAL,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
 )
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
-import enum
 
 from app.database import Base
 
@@ -44,6 +55,28 @@ class AlertType(str, enum.Enum):
     WATER_DETECTED = "water_detected"
     SENSOR_OFFLINE = "sensor_offline"
     LOW_BATTERY = "low_battery"
+
+
+class JSONText(TypeDecorator):
+    """Database-portable JSON storage backed by TEXT."""
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False)
+
+    def process_result_value(self, value, dialect):
+        if value in (None, ""):
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return value
 
 
 class Sensor(Base):
@@ -102,7 +135,7 @@ class SensorReading(Base):
     
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     sensor_id = Column(String(50), ForeignKey("sensors.sensor_id", ondelete="CASCADE"), nullable=False)
-    sensor_type = Column(Enum(SensorType), nullable=False)
+    sensor_type = Column(String(20), nullable=False)
     # Ultrasonic fields
     water_level = Column(DECIMAL(10, 2))
     # Immersion fields
@@ -113,7 +146,7 @@ class SensorReading(Base):
     status = Column(String(20), default="normal")
     battery_level = Column(DECIMAL(5, 2))
     signal_strength = Column(Integer)
-    raw_data = Column(JSON)
+    raw_data = Column(JSONText)
     recorded_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -140,7 +173,7 @@ class Alert(Base):
     alert_type = Column(String(20), nullable=False)
     severity = Column(String(20), default="medium")
     message = Column(Text, nullable=False)
-    details = Column(JSON)
+    details = Column(JSONText)
     is_resolved = Column(Boolean, default=False)
     resolved_at = Column(DateTime)
     resolved_by = Column(String(50))
@@ -176,7 +209,7 @@ class AdminUser(Base):
     display_name = Column(String(50), nullable=False)
     email = Column(String(255), unique=True, nullable=False, index=True)
     phone = Column(String(32), default="")
-    role = Column(String(50), default="系统管理员")
+    role = Column("ROLE", String(50), default="系统管理员")
     password_hash = Column(String(255), default="")
     auth_provider = Column(String(32), default="local")
     external_subject = Column(String(128), nullable=True, index=True)

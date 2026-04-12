@@ -10,9 +10,13 @@
 
 二进制协议定义 (3字节):
   字节0: 状态字节
-    - bit 0: water_status (0=无水, 1=有水)
+    - bit 0: 传感器状态
+      * 浸水传感器: water_status (0=无水, 1=有水)
+      * 超声波传感器: high_level_status (0=正常, 1=高液位)
     - bits 2-1: flags (01=低电量, 10=传感器故障)
-    - bits 5-3: msg_type (000=心跳, 001=状态变化, 010=电压上报, 011=系统启动)
+    - bits 5-3: msg_type
+      * 0xx: 浸水传感器数据包
+      * 1xx: 超声波液位数据包
     - bits 7-6: 保留
   字节1: ADC值低8位
   字节2: ADC值高8位
@@ -22,11 +26,60 @@
 
 配置方式（推荐环境变量）:
     export WEBHOOK_KEY=your_webhook_key_here
+    export UDP_SECRET_KEY=your_secret_key_here
     python webhook_proxy.py
 
 运行后监听:
   - TCP 0.0.0.0:8080 - 用于CH32V208/ESP8266 HTTP代理
   - UDP 0.0.0.0:8080 - 用于BC260 NB-IoT二进制数据（与TCP共用端口）
+
+============================================
+Systemd Service 部署说明
+============================================
+
+1. 创建服务文件 /etc/systemd/system/webhook-proxy.service:
+
+[Unit]
+Description=Webhook Proxy for Water Immersion Alarm
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+Environment="WEBHOOK_KEY=your_webhook_key_here"
+Environment="UDP_SECRET_KEY=your_secret_key_here"
+ExecStart=/usr/bin/python3 /home/ubuntu/webhook_proxy.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+
+2. 多密钥配置（支持多个传感器使用不同密钥）：
+
+[Service]
+...
+Environment="UDP_SECRET_KEY=DEVICE_KEY_1,DEVICE_KEY_2,DEVICE_KEY_3"
+...
+
+
+3. 启动和管理服务：
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable webhook-proxy.service
+    sudo systemctl start webhook-proxy.service
+    sudo systemctl status webhook-proxy.service
+    sudo systemctl restart webhook-proxy.service
+    sudo systemctl stop webhook-proxy.service
+
+
+4. 查看日志：
+
+    sudo journalctl -u webhook-proxy.service -f
+    sudo journalctl -u webhook-proxy.service --since "1 hour ago"
+
 """
 
 import socket
@@ -53,6 +106,7 @@ def load_config(config_path=None):
     
     服务器部署推荐方式：
       export WEBHOOK_KEY=your_key_here
+      export UDP_SECRET_KEY=your_secret_here
       python webhook_proxy.py
     
     或使用 systemd service 的 Environment 配置
@@ -64,6 +118,11 @@ def load_config(config_path=None):
     if env_webhook_key:
         config['WEBHOOK_KEY'] = env_webhook_key
         print(f"[+] 从环境变量加载 WEBHOOK_KEY")
+    
+    env_udp_secret = os.environ.get('UDP_SECRET_KEY', '').strip()
+    if env_udp_secret:
+        config['UDP_SECRET_KEY'] = env_udp_secret
+        print(f"[+] 从环境变量加载 UDP_SECRET_KEY")
     
     # 2. 尝试从配置文件加载（本地开发用）
     if config_path is None:
@@ -97,6 +156,65 @@ def load_config(config_path=None):
             print(f"[-] 加载配置文件失败: {e}")
     
     return config
+
+
+def verify_and_extract_payload(data: bytes, secret_keys: list[str]) -> tuple[bytes, bool, str | None]:
+    """
+    验证密钥并提取有效载荷（支持多密钥）
+    
+    如果配置了 secret_keys，数据包必须以其中一个密钥开头
+    
+    Args:
+        data: 原始接收的数据
+        secret_keys: 配置的密钥列表
+    
+    Returns:
+        tuple: (提取的有效载荷, 验证是否通过, 匹配到的密钥或None)
+    """
+    # 如果没有配置密钥，直接返回原始数据（验证通过）
+    if not secret_keys:
+        return data, True, None
+    
+    for secret_key in secret_keys:
+        if not secret_key:
+            continue
+        secret_bytes = secret_key.encode('utf-8')
+        
+        # 检查数据包是否以密钥开头
+        if len(data) >= len(secret_bytes) and data.startswith(secret_bytes):
+            # 移除密钥前缀，返回剩余数据
+            return data[len(secret_bytes):], True, secret_key
+    
+    return data, False, None
+
+
+def parse_device_payload(data: bytes) -> tuple[bytes, str | None]:
+    """
+    解析设备发送的数据包，提取设备ID和有效载荷
+    
+    数据包格式: [设备ID:] + [密钥] + [3字节HEX数据]
+    例如: "869999051234567:KEY123089209" 或 "KEY123089209"（无设备ID）
+    
+    Args:
+        data: 原始接收的数据
+    
+    Returns:
+        tuple: (剩余的有效载荷数据, 设备ID或None)
+    """
+    try:
+        # 尝试将数据解码为ASCII字符串
+        data_str = data.decode('ascii')
+        
+        # 检查是否包含设备ID分隔符（第一个冒号）
+        if ':' in data_str:
+            parts = data_str.split(':', 1)
+            device_id = parts[0]
+            remaining = parts[1].encode('ascii')
+            return remaining, device_id
+    except (UnicodeDecodeError, ValueError):
+        pass
+    
+    return data, None
 
 
 def decode_binary_payload(data: bytes) -> dict | None:
@@ -134,12 +252,20 @@ def decode_binary_payload(data: bytes) -> dict | None:
     water_status = status_byte & 0x01
     flags = (status_byte >> 1) & 0x03
     msg_type = (status_byte >> 3) & 0x07
+    sensor_type = "ultrasonic" if (msg_type & 0x04) else "immersion"
+    event_type = msg_type & 0x03
 
-    msg_type_names = {
-        0: "心跳",
-        1: "状态变化",
-        2: "电压上报",
-        3: "系统启动",
+    immersion_type_names = {
+        0: "浸水心跳",
+        1: "浸水状态变化",
+        2: "浸水电压上报",
+        3: "浸水系统启动",
+    }
+    ultrasonic_type_names = {
+        0: "超声波心跳",
+        1: "超声波高液位上报",
+        2: "超声波定时上报",
+        3: "超声波系统启动",
     }
 
     flag_names = []
@@ -152,14 +278,25 @@ def decode_binary_payload(data: bytes) -> dict | None:
     voltage = (adc_raw / 4095.0) * 3.3 if adc_raw <= 4095 else None
 
     return {
+        "sensor_type": sensor_type,
+        "sensor_type_name": "超声波液位" if sensor_type == "ultrasonic" else "浸水",
+        "event_type": event_type,
         "msg_type": msg_type,
-        "msg_type_name": msg_type_names.get(msg_type, f"未知类型({msg_type})"),
+        "msg_type_name": (
+            ultrasonic_type_names.get(event_type, f"未知超声类型({msg_type})")
+            if sensor_type == "ultrasonic"
+            else immersion_type_names.get(event_type, f"未知浸水类型({msg_type})")
+        ),
         "water_status": water_status,
-        "water_status_text": "有水" if water_status else "无水",
+        "water_status_text": (
+            "高液位" if water_status else "液位正常"
+        ) if sensor_type == "ultrasonic" else ("有水" if water_status else "无水"),
         "flags": flags,
         "flag_names": flag_names,
         "adc_raw": adc_raw,
         "voltage": voltage,
+        "measurement_value": adc_raw,
+        "distance_mm": adc_raw if sensor_type == "ultrasonic" else None,
         "raw_hex": data[:3].hex()
     }
 
@@ -197,17 +334,25 @@ def send_wechat_message(webhook_key, message):
         return False
 
 
-def format_udp_message(client_addr, decoded, packet_size):
+def format_udp_message(client_addr, decoded, packet_size, device_id=None):
     """格式化UDP消息文本"""
     lines = [
         "【UDP设备告警/上报】",
         f"来源: {client_addr[0]}:{client_addr[1]}",
-        f"类型: {decoded['msg_type_name']}",
-        f"水浸状态: {decoded['water_status_text']}",
-        f"ADC原始值: {decoded['adc_raw']}",
     ]
-    if decoded['voltage'] is not None:
-        lines.append(f"估算电压: {decoded['voltage']:.3f}V")
+    if device_id:
+        lines.append(f"设备ID: {device_id}")
+    lines.append(f"传感器类型: {decoded['sensor_type_name']}")
+    lines.append(f"类型: {decoded['msg_type_name']}")
+
+    if decoded['sensor_type'] == 'ultrasonic':
+        lines.append(f"测距值: {decoded['distance_mm']}mm")
+        lines.append(f"液位告警状态: {decoded['water_status_text']}")
+    else:
+        lines.append(f"水浸状态: {decoded['water_status_text']}")
+        lines.append(f"ADC原始值: {decoded['adc_raw']}")
+        if decoded['voltage'] is not None:
+            lines.append(f"估算电压: {decoded['voltage']:.3f}V")
     if decoded['flag_names']:
         lines.append(f"设备标志: {', '.join(decoded['flag_names'])}")
     lines.append(f"原始数据: {decoded['raw_hex']}")
@@ -323,7 +468,7 @@ def run_tcp_server(webhook_key, port):
         print("\n[TCP] 服务器已停止")
 
 
-def run_udp_server(webhook_key, port, forward_heartbeat=False):
+def run_udp_server(webhook_key, port, forward_heartbeat=False, secret_keys=None):
     """运行UDP代理服务器"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -333,15 +478,31 @@ def run_udp_server(webhook_key, port, forward_heartbeat=False):
     sock.bind(('0.0.0.0', port))
 
     print(f"[UDP] 代理服务器已启动: 0.0.0.0:{port}")
+    if secret_keys:
+        print(f"[UDP] 密钥验证已启用: {len(secret_keys)} 个密钥")
 
     try:
         while True:
             data, addr = sock.recvfrom(1024)
             print(f"\n[UDP] 收到来自 {addr[0]}:{addr[1]} 的数据: {data.hex()} ({len(data)}字节)")
 
-            decoded = decode_binary_payload(data)
+            # 解析设备ID（如果包含在数据中）
+            remaining_data, device_id = parse_device_payload(data)
+            
+            # 密钥验证
+            payload, verified, matched_key = verify_and_extract_payload(remaining_data, secret_keys or [])
+            if secret_keys and not verified:
+                print(f"[!] 密钥验证失败，拒绝处理来自 {addr[0]}:{addr[1]} 的数据")
+                sock.sendto(b'ERR_AUTH', addr)
+                continue
+            
+            if secret_keys and verified:
+                key_hint = matched_key[:4] + "..." if matched_key and len(matched_key) > 6 else matched_key
+                print(f"[*] 密钥验证通过 ({key_hint})，设备ID: {device_id or '未知'}")
+
+            decoded = decode_binary_payload(payload)
             if decoded is None:
-                print(f"[-] 数据长度不足，无法解码 (收到{len(data)}字节，需要至少3字节)")
+                print(f"[-] 数据长度不足，无法解码 (收到{len(payload)}字节，需要至少3字节)")
                 # 发送错误响应
                 sock.sendto(b'ERR_LEN', addr)
                 continue
@@ -361,7 +522,7 @@ def run_udp_server(webhook_key, port, forward_heartbeat=False):
                 print("[*] 心跳消息，仅记录日志，不转发到微信")
                 continue
 
-            message = format_udp_message(addr, decoded, len(data))
+            message = format_udp_message(addr, decoded, len(data), device_id)
             send_wechat_message(webhook_key, message)
 
     except KeyboardInterrupt:
@@ -405,6 +566,7 @@ systemd service 配置示例:
     parser.add_argument('--config', help='指定config.env路径')
     parser.add_argument('--forward-heartbeat', action='store_true',
                         help='将心跳消息也转发到企业微信 (默认不转发)')
+    parser.add_argument('--udp-secret', help='UDP密钥（覆盖配置文件中的UDP_SECRET_KEY）')
 
     args = parser.parse_args()
 
@@ -414,6 +576,17 @@ systemd service 配置示例:
     webhook_key = args.webhook_key
     if not webhook_key:
         webhook_key = config.get('WEBHOOK_KEY', '').strip()
+    
+    # UDP密钥：命令行参数 > 环境变量/配置文件
+    # 支持多密钥，用逗号分隔
+    udp_secret_str = args.udp_secret
+    if not udp_secret_str:
+        udp_secret_str = config.get('UDP_SECRET_KEY', '').strip()
+    
+    # 解析密钥列表（逗号分隔，去除空白）
+    udp_secrets = []
+    if udp_secret_str:
+        udp_secrets = [s.strip() for s in udp_secret_str.split(',') if s.strip()]
 
     # 打印启动信息
     print("=" * 60)
@@ -427,6 +600,14 @@ systemd service 配置示例:
         print(f"Webhook Key: {masked_key}")
     else:
         print(f"Webhook Key: 未配置 (消息只记录日志)")
+    
+    if udp_secrets:
+        if len(udp_secrets) == 1:
+            masked = udp_secrets[0][:2] + "***" + udp_secrets[0][-2:] if len(udp_secrets[0]) > 6 else "***"
+            print(f"UDP Secret Key: {masked} (1个密钥)")
+        else:
+            print(f"UDP Secret Keys: 已配置 {len(udp_secrets)} 个密钥")
+    
     print(f"转发心跳: {'是' if args.forward_heartbeat else '否'}")
     print()
     print("TCP模式: 接收CH32V208/ESP8266的HTTP请求")
@@ -443,7 +624,7 @@ systemd service 配置示例:
     )
     udp_thread = threading.Thread(
         target=run_udp_server,
-        args=(webhook_key, args.port, args.forward_heartbeat),
+        args=(webhook_key, args.port, args.forward_heartbeat, udp_secrets),
         daemon=True
     )
 

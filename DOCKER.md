@@ -85,6 +85,14 @@ docker compose down
 | http://localhost:8000 | FastAPI 后端直连 |
 | http://localhost:8080/webhook/sensor | Webhook 接收端点 |
 
+如果 `http://localhost` 被宿主机上的其他服务占用，可在 `.env` 中设置：
+
+```env
+HOST_HTTP_PORT=8081
+```
+
+然后改用 `http://localhost:8081` 访问主站点。
+
 ## PhpStorm 一键启动
 
 1. 打开 PhpStorm
@@ -138,6 +146,9 @@ DB_PASSWORD=flood_monitoring_2025
 # API
 DEBUG=false
 SECRET_KEY=your-secret-key-change-this-in-production
+
+# 主站点端口
+HOST_HTTP_PORT=80
 
 # Webhook（企业微信）
 WEBHOOK_KEY=your_wechat_webhook_key
@@ -227,9 +238,11 @@ services:
 # 检查端口占用
 netstat -ano | findstr :80
 
-# 或使用 Docker 映射到其他端口
-# 修改 docker-compose.yml 中的 ports 部分
+# 或改用其他主站点端口
+# 编辑 .env，把 HOST_HTTP_PORT 改成 8081 等未占用端口
 ```
+
+如果你打开 `http://localhost` 看到的是 `Caddy works!`，通常表示宿主机上已经有另一个 Caddy 或其他 Web 服务占用了 80 端口，而不是本项目本身有问题。
 
 ### 数据库连接失败
 

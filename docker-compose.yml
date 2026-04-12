@@ -15,8 +15,8 @@ services:
       MYSQL_PASSWORD: ${DB_PASSWORD:-flood_monitoring_2025}
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./database/procedures.sql:/docker-entrypoint-initdb.d/02-procedures.sql:ro
+      - ./database/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./database/mysql/procedures.sql:/docker-entrypoint-initdb.d/02-procedures.sql:ro
     ports:
       - "3306:3306"
     networks:
@@ -36,6 +36,9 @@ services:
     container_name: flood-monitoring-backend
     restart: unless-stopped
     environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      DB_DIALECT: ${DB_DIALECT:-mysql}
+      DB_DRIVER: ${DB_DRIVER:-aiomysql}
       DB_HOST: mysql
       DB_PORT: 3306
       DB_NAME: ${DB_NAME:-flood_monitoring}
@@ -123,7 +126,7 @@ services:
     container_name: flood-monitoring-caddy
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${HOST_HTTP_PORT:-80}:80"
       - "8000:8000"
     depends_on:
       - backend
