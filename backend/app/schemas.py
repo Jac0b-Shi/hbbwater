@@ -1,8 +1,25 @@
 """Pydantic schemas for request/response validation."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Union
 from decimal import Decimal
 from pydantic import BaseModel, Field, field_validator
+
+
+def normalize_datetime_to_utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    """Store timestamps as naive UTC to match existing database columns."""
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def parse_datetime_to_utc_naive(value):
+    if isinstance(value, str):
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return normalize_datetime_to_utc_naive(datetime.fromisoformat(value))
+    if isinstance(value, datetime):
+        return normalize_datetime_to_utc_naive(value)
+    return value
 
 
 # ==================== Sensor Schemas ====================
@@ -103,12 +120,7 @@ class SensorDataInput(BaseModel):
     @field_validator('timestamp', mode='before')
     @classmethod
     def parse_timestamp(cls, v):
-        if isinstance(v, str):
-            # Handle ISO format with Z
-            if v.endswith('Z'):
-                v = v[:-1] + '+00:00'
-            return datetime.fromisoformat(v)
-        return v
+        return parse_datetime_to_utc_naive(v)
 
 
 class WebhookDataInput(BaseModel):
@@ -128,11 +140,7 @@ class WebhookDataInput(BaseModel):
     @field_validator('timestamp', mode='before')
     @classmethod
     def parse_timestamp(cls, v):
-        if isinstance(v, str):
-            if v.endswith('Z'):
-                v = v[:-1] + '+00:00'
-            return datetime.fromisoformat(v)
-        return v
+        return parse_datetime_to_utc_naive(v)
 
 
 class GroupWebhookDataInput(BaseModel):
@@ -145,6 +153,7 @@ class GroupWebhookDataInput(BaseModel):
     source: Optional[str] = None
     source_ip: Optional[str] = None
     source_port: Optional[int] = None
+    event_id: Optional[str] = Field(None, max_length=64)
     msg_type: Optional[int] = None
     msg_type_name: Optional[str] = None
     water_level: Optional[Decimal] = None
@@ -162,11 +171,7 @@ class GroupWebhookDataInput(BaseModel):
     @field_validator('timestamp', mode='before')
     @classmethod
     def parse_group_timestamp(cls, v):
-        if isinstance(v, str):
-            if v.endswith('Z'):
-                v = v[:-1] + '+00:00'
-            return datetime.fromisoformat(v)
-        return v
+        return parse_datetime_to_utc_naive(v)
 
 
 class SensorReadingResponse(BaseModel):

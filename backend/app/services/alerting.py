@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -15,6 +15,13 @@ THRESHOLD_CONDITION_GREATER_OR_EQUAL = "greater_or_equal"
 THRESHOLD_CONDITION_LESS_OR_EQUAL = "less_or_equal"
 DEFAULT_THRESHOLD_CONDITION = THRESHOLD_CONDITION_GREATER_OR_EQUAL
 AUTO_RESOLVE_ACTOR = "system:auto"
+
+
+def _normalize_datetime_to_utc_naive(value: datetime) -> datetime:
+    """Keep alert calculations compatible with naive UTC DB timestamps."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def get_sensor_type_value(sensor_type: SensorType | str) -> str:
@@ -96,6 +103,7 @@ async def _resolve_active_alerts(
     alert_type: str,
     resolved_at: datetime,
 ) -> None:
+    resolved_at = _normalize_datetime_to_utc_naive(resolved_at)
     result = await db.execute(
         select(Alert).where(
             Alert.sensor_id == sensor_id,
@@ -141,6 +149,7 @@ async def _upsert_active_alert(
     message: str,
     details: dict,
 ) -> Optional[Alert]:
+    reading.recorded_at = _normalize_datetime_to_utc_naive(reading.recorded_at)
     cooldown_minutes = await get_int_config(control_db, "alert_cooldown_minutes", 30)
     active_alert = await _get_latest_active_alert(
         db,
@@ -148,8 +157,10 @@ async def _upsert_active_alert(
         alert_type=alert_type,
         severity=severity,
     )
-    if active_alert and (reading.recorded_at - active_alert.created_at).total_seconds() < cooldown_minutes * 60:
-        return active_alert
+    if active_alert:
+        active_created_at = _normalize_datetime_to_utc_naive(active_alert.created_at)
+        if (reading.recorded_at - active_created_at).total_seconds() < cooldown_minutes * 60:
+            return active_alert
 
     await _resolve_active_alerts(
         db,

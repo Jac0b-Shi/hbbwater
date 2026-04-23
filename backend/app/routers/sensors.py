@@ -15,7 +15,8 @@ from app.schemas import (
     SensorDataInput, SensorReadingResponse, SensorReadingList,
     SensorStatus, SensorTimeSeries, TimeSeriesPoint,
     WebhookDataInput, GroupWebhookDataInput,
-    WebhookGroupCreate, WebhookGroupUpdate, WebhookGroupResponse, WebhookGroupDetail
+    WebhookGroupCreate, WebhookGroupUpdate, WebhookGroupResponse, WebhookGroupDetail,
+    normalize_datetime_to_utc_naive,
 )
 from app.services.alerting import (
     get_threshold_configuration_error,
@@ -168,10 +169,15 @@ def extract_group_water_level(payload: GroupWebhookDataInput) -> Optional[float]
     return None
 
 
+def get_recorded_at(timestamp: Optional[datetime]) -> datetime:
+    """Normalize inbound timestamps before comparing or persisting them."""
+    return normalize_datetime_to_utc_naive(timestamp) or datetime.utcnow()
+
+
 def build_group_sensor_reading(sensor: Sensor, payload: GroupWebhookDataInput, device_imei: str) -> SensorReading:
     """Convert a group webhook payload into a normalized reading."""
     sensor_type = get_sensor_type_value(sensor.sensor_type)
-    recorded_at = payload.timestamp or datetime.utcnow()
+    recorded_at = get_recorded_at(payload.timestamp)
     raw_data = payload.model_dump(mode="json", exclude_none=True)
     raw_data["device_imei"] = device_imei
 
@@ -318,7 +324,7 @@ async def delete_webhook_group(
 def build_sensor_reading(sensor: Sensor, payload: SensorDataInput | WebhookDataInput) -> SensorReading:
     """Convert sensor payloads into a normalized reading model."""
     sensor_type = get_sensor_type_value(sensor.sensor_type)
-    recorded_at = payload.timestamp or datetime.utcnow()
+    recorded_at = get_recorded_at(payload.timestamp)
     reading_data = {
         "sensor_id": sensor.sensor_id,
         "sensor_type": sensor_type,
@@ -703,6 +709,8 @@ async def get_sensor_readings(
         raise HTTPException(status_code=404, detail="Sensor not found")
 
     query = select(SensorReading).where(SensorReading.sensor_id == sensor_id)
+    start_time = normalize_datetime_to_utc_naive(start_time)
+    end_time = normalize_datetime_to_utc_naive(end_time)
 
     if start_time:
         query = query.where(SensorReading.recorded_at >= start_time)

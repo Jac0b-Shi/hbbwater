@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -31,7 +32,7 @@ try:
         extract_group_water_level,
         normalize_water_level,
     )
-    from app.schemas import GroupWebhookDataInput
+    from app.schemas import GroupWebhookDataInput, SensorDataInput
     from app.services.account import build_gravatar
     from app.services.alerting import (
         infer_ultrasonic_status,
@@ -69,6 +70,23 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue(extract_water_detected(payload))
         ultrasonic_payload = GroupWebhookDataInput(sensor_value="128.4")
         self.assertEqual(extract_group_water_level(ultrasonic_payload), 128.4)
+
+    def test_inbound_timestamps_are_normalized_to_naive_utc(self):
+        payload = GroupWebhookDataInput(
+            device_id="863237085571598",
+            timestamp="2026-04-23T20:50:48+08:00",
+            sensor_value="923",
+        )
+        self.assertEqual(payload.timestamp, datetime(2026, 4, 23, 12, 50, 48))
+        self.assertIsNone(payload.timestamp.tzinfo)
+
+        sensor_payload = SensorDataInput(
+            sensor_id="ultrasonic_002",
+            sensor_type="ultrasonic",
+            timestamp="2026-04-23T12:50:48Z",
+        )
+        self.assertEqual(sensor_payload.timestamp, datetime(2026, 4, 23, 12, 50, 48))
+        self.assertIsNone(sensor_payload.timestamp.tzinfo)
 
     def test_ultrasonic_reading_unit_conversion(self):
         mm_sensor = SimpleNamespace(measurement_unit="mm")
