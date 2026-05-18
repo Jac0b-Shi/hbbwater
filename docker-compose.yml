@@ -35,6 +35,8 @@ services:
       dockerfile: Dockerfile
     container_name: flood-monitoring-backend
     restart: unless-stopped
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-512m}
+    memswap_limit: ${BACKEND_MEMORY_SWAP_LIMIT:-512m}
     environment:
       CONTROL_DATABASE_URL: ${BACKEND_CONTROL_DATABASE_URL:-sqlite+aiosqlite:////app/runtime/control.db}
       BUSINESS_DATABASE_URL: ${BACKEND_DATABASE_URL:-}
@@ -49,6 +51,15 @@ services:
       BUSINESS_DM_HOME: ${BACKEND_DM_HOME:-}
       BUSINESS_DM_SVC_PATH: ${BACKEND_DM_SVC_PATH:-}
       BUSINESS_AUTO_CREATE_SCHEMA: ${BACKEND_AUTO_CREATE_SCHEMA:-}
+      BUSINESS_DB_WATCHDOG_ENABLED: ${BUSINESS_DB_WATCHDOG_ENABLED:-true}
+      BUSINESS_DB_WATCHDOG_INTERVAL_SECONDS: ${BUSINESS_DB_WATCHDOG_INTERVAL_SECONDS:-30}
+      BUSINESS_DB_WATCHDOG_TIMEOUT_SECONDS: ${BUSINESS_DB_WATCHDOG_TIMEOUT_SECONDS:-10}
+      BUSINESS_DB_WATCHDOG_MAX_FAILURES: ${BUSINESS_DB_WATCHDOG_MAX_FAILURES:-3}
+      BUSINESS_DB_WATCHDOG_STARTUP_GRACE_SECONDS: ${BUSINESS_DB_WATCHDOG_STARTUP_GRACE_SECONDS:-60}
+      BUSINESS_DB_READY_TIMEOUT_SECONDS: ${BUSINESS_DB_READY_TIMEOUT_SECONDS:-5}
+      PROCESS_MEMORY_WATCHDOG_ENABLED: ${PROCESS_MEMORY_WATCHDOG_ENABLED:-true}
+      PROCESS_MEMORY_WATCHDOG_LIMIT_MB: ${PROCESS_MEMORY_WATCHDOG_LIMIT_MB:-384}
+      PROCESS_MEMORY_WATCHDOG_INTERVAL_SECONDS: ${PROCESS_MEMORY_WATCHDOG_INTERVAL_SECONDS:-30}
       API_HOST: 0.0.0.0
       API_PORT: 8000
       DEBUG: ${DEBUG:-false}
@@ -68,7 +79,7 @@ services:
     networks:
       - flood-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=8)"]
       interval: 30s
       timeout: 10s
       retries: 3

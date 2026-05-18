@@ -7,6 +7,7 @@ from typing import Iterable
 
 from dotenv import load_dotenv
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
@@ -364,6 +365,48 @@ async def test_business_database_settings(settings: DatabaseSettings) -> dict[st
     engine, database_url, dialect = await _prepare_business_engine(settings)
     await engine.dispose()
     return {"database_url": database_url, "dialect": dialect}
+
+
+async def ping_business_database() -> dict[str, str | bool | int | None]:
+    """Run a lightweight query against the active business database."""
+    await ensure_business_database_ready()
+    if _business_engine is None:
+        raise RuntimeError("Business database engine is not configured")
+
+    async with _business_engine.connect() as conn:
+        value = (await conn.execute(text("select 1"))).scalar()
+
+    return {
+        **get_business_runtime_state(),
+        "ok": value == 1,
+        "select_1": value,
+    }
+
+
+async def probe_business_database_path() -> dict[str, str | bool | int | None]:
+    """Run representative business queries through the active session path."""
+    from sqlalchemy import desc, func, select
+
+    from app.models import Sensor, SensorReading
+
+    await ensure_business_database_ready()
+    if _business_session_factory is None:
+        raise RuntimeError("Business database session factory is not configured")
+
+    async with _business_session_factory() as session:
+        sensor_count = await session.scalar(select(func.count()).select_from(Sensor))
+        reading_count = await session.scalar(select(func.count()).select_from(SensorReading))
+        latest_reading_id = await session.scalar(
+            select(SensorReading.id).order_by(desc(SensorReading.created_at)).limit(1)
+        )
+
+    return {
+        **get_business_runtime_state(),
+        "ok": True,
+        "sensor_count": sensor_count,
+        "reading_count": reading_count,
+        "latest_reading_id": latest_reading_id,
+    }
 
 
 async def dispose_databases() -> None:

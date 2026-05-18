@@ -4,13 +4,25 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import ControlBase, ControlSessionLocal, activate_business_database, control_engine, dispose_databases
+from app.database import (
+    ControlBase,
+    ControlSessionLocal,
+    activate_business_database,
+    control_engine,
+    dispose_databases,
+    probe_business_database_path,
+)
 from app.routers import sensors, alerts, dashboard, config, account, auth
 from app.services.account import account_service
 from app.services.business_profiles import ensure_business_profiles_bootstrap, profile_to_settings
+from app.services.health_watchdog import (
+    start_business_database_watchdog,
+    start_memory_watchdog,
+    stop_watchdog,
+)
 
 
 @asynccontextmanager
@@ -55,9 +67,16 @@ async def lifespan(app: FastAPI):
             "Control-plane endpoints will remain available."
         )
 
+    watchdog_tasks = [
+        start_business_database_watchdog(),
+        start_memory_watchdog(),
+    ]
+
     yield
 
     print(f"[{datetime.utcnow()}] Flood Monitoring API shutting down...")
+    for watchdog_task in watchdog_tasks:
+        await stop_watchdog(watchdog_task)
     await dispose_databases()
 
 
@@ -80,11 +99,37 @@ app.add_middleware(
 
 @app.get("/health", tags=["health"])
 async def health_check():
-    """Health check endpoint."""
+    """Liveness check endpoint."""
     return {
         "status": "healthy",
         "version": "1.0.0",
         "service": "flood-monitoring-api",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/health/ready", tags=["health"])
+async def readiness_check():
+    """Readiness check that exercises the business database path."""
+    timeout_seconds = float(os.getenv("BUSINESS_DB_READY_TIMEOUT_SECONDS", "5"))
+    try:
+        state = await asyncio.wait_for(probe_business_database_path(), timeout=timeout_seconds)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unhealthy",
+                "service": "flood-monitoring-api",
+                "error": str(exc),
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        ) from exc
+
+    return {
+        "status": "ready",
+        "version": "1.0.0",
+        "service": "flood-monitoring-api",
+        "business_database": state,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
