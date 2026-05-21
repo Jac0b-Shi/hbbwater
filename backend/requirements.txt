@@ -1,11 +1,11 @@
 # FastAPI Backend Dependencies
-fastapi==0.115.0
+fastapi==0.136.1
 uvicorn[standard]==0.32.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 
 # Database
 sqlalchemy==2.0.36
-aiomysql==0.2.0
+aiomysql==0.3.2
 aiosqlite==0.20.0
 alembic==1.14.0
 
@@ -24,13 +24,13 @@ python-dateutil==2.9.0
 pytz==2024.2
 orjson>=3.10.15
 httpx==0.28.1
-urllib3>=2.2.3
+urllib3==2.7.0
 
 # Security
-python-jose[cryptography]==3.3.0
+python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
-python-multipart>=0.0.17
+python-multipart==0.0.29
 
 # Monitoring
 prometheus-client==0.21.0
