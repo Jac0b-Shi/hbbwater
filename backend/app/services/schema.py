@@ -1,11 +1,29 @@
 """Lightweight schema alignment for deployments without migrations."""
 from datetime import datetime
 
-from sqlalchemy import DECIMAL, Integer, String, bindparam, inspect, select, table, column, text, update
+from sqlalchemy import DECIMAL, Integer, String, bindparam, column, inspect, select, table, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.models import WebhookGroup
+from app.models import RainfallHourly, WeatherStation, WebhookGroup
+
+
+DEFAULT_WEATHER_STATIONS = (
+    {
+        "station_id": "A5151",
+        "station_name": "宝山大场上大附中",
+        "role": "primary",
+        "longitude": 121.39,
+        "latitude": 31.31,
+    },
+    {
+        "station_id": "58362",
+        "station_name": "宝山",
+        "role": "backup",
+        "longitude": 121.4447222,
+        "latitude": 31.39083333,
+    },
+)
 
 
 async def _table_exists(conn: AsyncConnection, table_name: str) -> bool:
@@ -187,6 +205,59 @@ async def _sync_legacy_webhook_groups(conn: AsyncConnection) -> None:
         )
 
 
+async def _ensure_weather_tables(conn: AsyncConnection) -> None:
+    if not await _table_exists(conn, "weather_stations"):
+        await conn.run_sync(lambda sync_conn: WeatherStation.__table__.create(sync_conn, checkfirst=True))
+    if not await _table_exists(conn, "rainfall_hourly"):
+        await conn.run_sync(lambda sync_conn: RainfallHourly.__table__.create(sync_conn, checkfirst=True))
+
+
+async def _ensure_default_weather_stations(conn: AsyncConnection) -> None:
+    weather_stations = table(
+        "weather_stations",
+        column("station_id"),
+        column("station_name"),
+        column("role"),
+        column("longitude"),
+        column("latitude"),
+        column("is_active"),
+        column("created_at"),
+        column("updated_at"),
+    )
+    existing_station_ids = set(
+        (
+            await conn.execute(select(weather_stations.c.station_id))
+        ).scalars().all()
+    )
+    missing_stations = [
+        station for station in DEFAULT_WEATHER_STATIONS
+        if station["station_id"] not in existing_station_ids
+    ]
+    if not missing_stations:
+        return
+
+    now = datetime.utcnow()
+    await conn.execute(
+        text(
+            """
+            INSERT INTO weather_stations
+                (station_id, station_name, role, longitude, latitude, is_active, created_at, updated_at)
+            VALUES
+                (:station_id, :station_name, :role, :longitude, :latitude, :is_active, :created_at, :updated_at)
+            """
+        ),
+        [
+            {
+                **station,
+                "is_active": 1,
+                "created_at": now,
+                "updated_at": now,
+            }
+            for station in missing_stations
+        ],
+    )
+
+
 async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> None:
     """Add columns/indexes required by newer application versions."""
     existing_tables = await _list_existing_tables(conn)
@@ -200,6 +271,8 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
             "sensor_summary_hourly",
             "sensors",
             "webhook_groups",
+            "weather_stations",
+            "rainfall_hourly",
         }
         missing_tables = sorted(required_tables - existing_tables)
         if missing_tables:
@@ -208,6 +281,10 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
                 "'database/dm/init.sql' before starting the API. Missing tables: "
                 + ", ".join(missing_tables)
             )
+    else:
+        await _ensure_weather_tables(conn)
+
+    await _ensure_default_weather_stations(conn)
 
     if not await _table_exists(conn, "webhook_groups"):
         await conn.run_sync(lambda sync_conn: WebhookGroup.__table__.create(sync_conn, checkfirst=True))

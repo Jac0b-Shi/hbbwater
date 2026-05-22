@@ -197,6 +197,57 @@ class Alert(BusinessBase):
     )
 
 
+class WeatherStation(BusinessBase):
+    __tablename__ = "weather_stations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    station_id = Column(String(50), unique=True, nullable=False, index=True)
+    station_name = Column(String(100), nullable=False)
+    role = Column(String(20), nullable=False, default="primary")
+    longitude = Column(DECIMAL(11, 7))
+    latitude = Column(DECIMAL(10, 7))
+    is_active = Column(Boolean, default=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_weather_stations_role", "role"),
+        Index("idx_weather_stations_active", "is_active"),
+    )
+
+
+class RainfallHourly(BusinessBase):
+    __tablename__ = "rainfall_hourly"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    station_id = Column(String(50), nullable=False, index=True)
+    data_type = Column(String(20), nullable=False)
+    hour_time = Column(DateTime, nullable=False)
+    rainfall_mm = Column(DECIMAL(10, 2), nullable=False)
+    batch_time = Column(DateTime, nullable=False)
+    forecast_issued_at = Column(DateTime, nullable=True)
+    source_endpoint = Column(String(100), nullable=False, default="fycx_trend_sta")
+    raw_time_label = Column(String(50), default="")
+    source_updated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_rainfall_station_type_hour", "station_id", "data_type", "hour_time"),
+        Index("idx_rainfall_station_batch", "station_id", "data_type", "batch_time"),
+        Index(
+            "uk_rainfall_station_type_hour_batch",
+            "station_id",
+            "data_type",
+            "hour_time",
+            "batch_time",
+            unique=True,
+        ),
+    )
+
+
 class SystemConfig(ControlBase):
     __tablename__ = "system_config"
     

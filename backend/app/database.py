@@ -1,6 +1,7 @@
 """Database connection and session management."""
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -455,6 +456,24 @@ async def get_business_db():
         if _business_runtime_error:
             detail = f"{detail}: {_business_runtime_error}"
         raise HTTPException(status_code=503, detail=detail) from exc
+
+    async with _business_session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+@asynccontextmanager
+async def business_session_scope():
+    """Create a committed business database session outside FastAPI dependencies."""
+    await ensure_business_database_ready()
+    if _business_session_factory is None:
+        raise RuntimeError("Business database session factory is not configured")
 
     async with _business_session_factory() as session:
         try:

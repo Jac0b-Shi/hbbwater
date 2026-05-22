@@ -230,6 +230,15 @@ BUSINESS_DB_PASSWORD=flood_monitoring_2025
 API_HOST=0.0.0.0
 API_PORT=8000
 DEBUG=true
+
+# 上海知天气小时雨量采集
+ZTQ_RAINFALL_ENABLED=true
+ZTQ_RAINFALL_DRY_INTERVAL_SECONDS=10800
+ZTQ_RAINFALL_ACTIVE_INTERVAL_SECONDS=1800
+ZTQ_RAINFALL_MIN_INTERVAL_SECONDS=300
+ZTQ_RAINFALL_STALE_SECONDS=21600
+# 默认站点：A5151 宝山大场上大附中，58362 宝山区级站
+# ZTQ_RAINFALL_STATIONS='[{"station_id":"A5151","station_name":"宝山大场上大附中","role":"primary","longitude":121.39,"latitude":31.31},{"station_id":"58362","station_name":"宝山","role":"backup","longitude":121.4447222,"latitude":31.39083333}]'
 ```
 
 ## 系统特性

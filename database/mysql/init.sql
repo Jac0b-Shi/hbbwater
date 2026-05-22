@@ -64,6 +64,40 @@ CREATE TABLE IF NOT EXISTS sensors (
     UNIQUE KEY uk_device_imei (device_imei)
 ) ENGINE=InnoDB COMMENT='传感器配置表';
 
+CREATE TABLE IF NOT EXISTS weather_stations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL UNIQUE COMMENT '知天气站点ID',
+    station_name VARCHAR(100) NOT NULL COMMENT '站点名称',
+    role VARCHAR(20) NOT NULL DEFAULT 'primary' COMMENT '站点角色(primary/backup)',
+    longitude DECIMAL(11,7) DEFAULT NULL COMMENT '经度',
+    latitude DECIMAL(10,7) DEFAULT NULL COMMENT '纬度',
+    is_active BOOLEAN DEFAULT TRUE COMMENT '是否启用采集',
+    last_success_at TIMESTAMP NULL DEFAULT NULL COMMENT '最近成功采集时间',
+    last_error TEXT COMMENT '最近采集错误',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_weather_stations_role (role),
+    INDEX idx_weather_stations_active (is_active)
+) ENGINE=InnoDB COMMENT='气象雨量站配置表';
+
+CREATE TABLE IF NOT EXISTS rainfall_hourly (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL COMMENT '知天气站点ID',
+    data_type VARCHAR(20) NOT NULL COMMENT 'actual=实况, forecast=预测',
+    hour_time TIMESTAMP NOT NULL COMMENT '小时起始时间(UTC)',
+    rainfall_mm DECIMAL(10,2) NOT NULL COMMENT '小时雨量(mm)',
+    batch_time TIMESTAMP NOT NULL COMMENT '幂等批次时间',
+    forecast_issued_at TIMESTAMP NULL DEFAULT NULL COMMENT '预报批次发布时间',
+    source_endpoint VARCHAR(100) NOT NULL DEFAULT 'fycx_trend_sta' COMMENT '来源接口',
+    raw_time_label VARCHAR(50) DEFAULT '' COMMENT '源接口原始时次标签',
+    source_updated_at TIMESTAMP NULL DEFAULT NULL COMMENT '源接口更新时间',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_rainfall_station_type_hour_batch (station_id, data_type, hour_time, batch_time),
+    INDEX idx_rainfall_station_type_hour (station_id, data_type, hour_time),
+    INDEX idx_rainfall_station_batch (station_id, data_type, batch_time)
+) ENGINE=InnoDB COMMENT='小时雨量实况与预测表';
+
 -- 传感器原始数据表（热数据，≤14天）
 CREATE TABLE IF NOT EXISTS sensor_readings (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -209,4 +243,15 @@ email = VALUES(email),
 phone = VALUES(phone),
 role = VALUES(role),
 auth_provider = VALUES(auth_provider),
+is_active = VALUES(is_active);
+
+INSERT INTO weather_stations (station_id, station_name, role, longitude, latitude, is_active)
+VALUES
+('A5151', '宝山大场上大附中', 'primary', 121.3900000, 31.3100000, TRUE),
+('58362', '宝山', 'backup', 121.4447222, 31.3908333, TRUE)
+ON DUPLICATE KEY UPDATE
+station_name = VALUES(station_name),
+role = VALUES(role),
+longitude = VALUES(longitude),
+latitude = VALUES(latitude),
 is_active = VALUES(is_active);
