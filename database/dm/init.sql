@@ -72,7 +72,7 @@ CREATE TABLE weather_stations (
     latitude DECIMAL(10,7),
     is_active SMALLINT DEFAULT 1,
     last_success_at TIMESTAMP,
-    last_error CLOB,
+    last_error VARCHAR(1000),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uk_weather_stations_station_id UNIQUE (station_id)

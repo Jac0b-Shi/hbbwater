@@ -208,7 +208,7 @@ class WeatherStation(BusinessBase):
     latitude = Column(DECIMAL(10, 7))
     is_active = Column(Boolean, default=True)
     last_success_at = Column(DateTime, nullable=True)
-    last_error = Column(Text, default="")
+    last_error = Column(String(1000), default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

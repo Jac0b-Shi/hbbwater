@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS weather_stations (
     latitude DECIMAL(10,7) DEFAULT NULL COMMENT '纬度',
     is_active BOOLEAN DEFAULT TRUE COMMENT '是否启用采集',
     last_success_at TIMESTAMP NULL DEFAULT NULL COMMENT '最近成功采集时间',
-    last_error TEXT COMMENT '最近采集错误',
+    last_error VARCHAR(1000) COMMENT '最近采集错误',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_weather_stations_role (role),

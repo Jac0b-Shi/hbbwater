@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import business_session_scope
@@ -464,6 +464,48 @@ async def _upsert_rainfall_points(db: AsyncSession, points: list[RainfallPoint])
     return inserted
 
 
+async def _mark_weather_station_success(db: AsyncSession, station_id: str, collected_at: datetime) -> None:
+    await db.execute(
+        text(
+            """
+            UPDATE weather_stations
+            SET last_success_at = :last_success_at,
+                last_error = '',
+                updated_at = :updated_at
+            WHERE station_id = :station_id
+            """
+        ),
+        {
+            "station_id": station_id,
+            "last_success_at": collected_at,
+            "updated_at": collected_at,
+        },
+    )
+
+
+async def _mark_weather_station_error(
+    db: AsyncSession,
+    station_id: str,
+    message: str,
+    collected_at: datetime,
+) -> None:
+    await db.execute(
+        text(
+            """
+            UPDATE weather_stations
+            SET last_error = :last_error,
+                updated_at = :updated_at
+            WHERE station_id = :station_id
+            """
+        ),
+        {
+            "station_id": station_id,
+            "last_error": message[:1000],
+            "updated_at": collected_at,
+        },
+    )
+
+
 async def collect_rainfall_once(
     *,
     client: ZtqWeatherClient | None = None,
@@ -496,24 +538,15 @@ async def collect_rainfall_once(
     point_count = 0
     has_positive_rainfall = False
     async with business_session_scope() as db:
-        rows_by_station = {
-            row.station_id: row
-            for row in (
-                await db.execute(
-                    select(WeatherStation).where(
-                        WeatherStation.station_id.in_([config.station_id for config in active_configs])
-                    )
-                )
-            ).scalars().all()
-        }
-
         for config in active_configs:
-            station_row = rows_by_station.get(config.station_id)
             trend_data, current_data = raw_payloads.get(config.station_id, ({}, {}))
             if not trend_data or not (trend_data.get("sk_list") or trend_data.get("yb_list")):
-                if station_row is not None:
-                    station_row.last_error = "知天气趋势接口未返回雨量时序"
-                    station_row.updated_at = collected_at
+                await _mark_weather_station_error(
+                    db,
+                    config.station_id,
+                    "知天气趋势接口未返回雨量时序",
+                    collected_at,
+                )
                 continue
 
             payload = parse_ztq_rainfall_payload(
@@ -526,10 +559,7 @@ async def collect_rainfall_once(
             point_count += len(payload.points)
             has_positive_rainfall = has_positive_rainfall or payload.has_positive_rainfall
 
-            if station_row is not None:
-                station_row.last_success_at = collected_at
-                station_row.last_error = ""
-                station_row.updated_at = collected_at
+            await _mark_weather_station_success(db, config.station_id, collected_at)
 
     return RainfallCollectionResult(
         collected_at=collected_at,
