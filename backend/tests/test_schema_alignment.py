@@ -3,6 +3,8 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 CURRENT_DIR = os.path.dirname(__file__)
@@ -17,7 +19,7 @@ try:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.database import BusinessBase
-    from app.models import Sensor, WebhookGroup
+    from app.models import RainfallHourly, Sensor, WeatherStation, WebhookGroup
     from app.services.schema import ensure_runtime_schema
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
     IMPORT_ERROR = exc
@@ -92,6 +94,25 @@ class SchemaAlignmentTests(unittest.IsolatedAsyncioTestCase):
             )
             broken_sensor = broken_sensor_result.scalar_one()
             self.assertIsNone(broken_sensor.webhook_group_id)
+
+            station_ids = set(
+                (
+                    await session.execute(select(WeatherStation.station_id))
+                ).scalars().all()
+            )
+            self.assertIn("A5151", station_ids)
+            self.assertIn("58362", station_ids)
+
+            rainfall = RainfallHourly(
+                station_id="A5151",
+                data_type="actual",
+                hour_time=datetime(2026, 5, 22, 10),
+                rainfall_mm=Decimal("0.1"),
+                batch_time=datetime(2026, 5, 22, 10),
+            )
+            session.add(rainfall)
+            await session.commit()
+            self.assertIsNotNone(rainfall.id)
 
 
 if __name__ == "__main__":

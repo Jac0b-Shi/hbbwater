@@ -52,6 +52,69 @@
       </el-col>
     </el-row>
 
+    <el-row :gutter="20" class="rainfall-row">
+      <el-col :span="24">
+        <el-card class="rainfall-card" shadow="hover" v-loading="weatherStore.loading">
+          <template #header>
+            <div class="card-header">
+              <div class="rainfall-title">
+                <el-icon><Cloudy /></el-icon>
+                <span>小时雨量</span>
+              </div>
+              <div class="rainfall-updated">
+                {{ weatherStore.rainfallSummary ? `更新 ${formatTime(weatherStore.rainfallSummary.updated_at)}` : '等待数据' }}
+              </div>
+            </div>
+          </template>
+
+          <div v-if="rainfallStations.length" class="rainfall-grid">
+            <div
+              v-for="station in rainfallStations"
+              :key="station.station_id"
+              class="rainfall-station"
+              :class="getRainfallStationClasses(station)"
+            >
+              <div class="rainfall-station-head">
+                <div>
+                  <div class="rainfall-station-name">{{ station.station_name }}</div>
+                  <div class="rainfall-station-id">{{ station.station_id }}</div>
+                </div>
+                <el-tag size="small" :type="getRainfallRoleTagType(station)">
+                  {{ getRainfallRoleText(station) }}
+                </el-tag>
+              </div>
+              <div class="rainfall-metrics">
+                <div class="rainfall-metric actual">
+                  <span class="metric-label">当前实况</span>
+                  <span class="metric-value">{{ formatRainfall(station.current_actual_mm) }}</span>
+                  <span class="metric-time">{{ station.current_actual_time ? formatTime(station.current_actual_time) : '暂无时次' }}</span>
+                </div>
+                <div class="rainfall-metric">
+                  <span class="metric-label">未来1h</span>
+                  <span class="metric-value">{{ formatRainfall(station.forecast_totals?.next_1h) }}</span>
+                </div>
+                <div class="rainfall-metric">
+                  <span class="metric-label">未来3h</span>
+                  <span class="metric-value">{{ formatRainfall(station.forecast_totals?.next_3h) }}</span>
+                </div>
+                <div class="rainfall-metric">
+                  <span class="metric-label">未来24h</span>
+                  <span class="metric-value">{{ formatRainfall(station.forecast_totals?.next_24h) }}</span>
+                </div>
+              </div>
+              <div class="rainfall-station-foot">
+                <span>{{ getRainfallStatusText(station) }}</span>
+                <span v-if="station.latest_forecast_issued_at">
+                  预报批次 {{ formatTime(station.latest_forecast_issued_at) }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="暂无雨量数据" />
+        </el-card>
+      </el-col>
+    </el-row>
+
     <!-- Main Content -->
     <el-row :gutter="20" class="main-row">
       <!-- Sensor Status Table -->
@@ -193,11 +256,14 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
+import { useWeatherStore } from '../stores/weather'
 import { formatUtc8DateTime, SHORT_DATE_TIME_FORMAT } from '../utils/time'
 
 const dashboardStore = useDashboardStore()
+const weatherStore = useWeatherStore()
 const dataFilter = ref('all')
 let refreshInterval = null
+let weatherRefreshInterval = null
 
 const filteredReadings = computed(() => {
   if (dataFilter.value === 'all') {
@@ -205,6 +271,8 @@ const filteredReadings = computed(() => {
   }
   return dashboardStore.recentReadings.filter(r => r.sensor_type === dataFilter.value)
 })
+
+const rainfallStations = computed(() => weatherStore.rainfallSummary?.stations || [])
 
 const getStatusType = (status) => {
   const map = {
@@ -264,21 +332,60 @@ const formatTime = (time) => {
   return formatUtc8DateTime(time, SHORT_DATE_TIME_FORMAT)
 }
 
+const formatRainfall = (value) => {
+  if (value === null || value === undefined) return '-- mm'
+  return `${Number(value).toFixed(1)} mm`
+}
+
+const getRainfallRoleText = (station) => {
+  if (station.station_id === weatherStore.rainfallSummary?.selected_station_id) {
+    return station.role === 'primary' ? '主站参考' : '备份参考'
+  }
+  return station.role === 'primary' ? '主站' : '备份'
+}
+
+const getRainfallRoleTagType = (station) => {
+  if (station.station_id === weatherStore.rainfallSummary?.selected_station_id) return 'success'
+  return station.role === 'primary' ? 'primary' : 'info'
+}
+
+const getRainfallStatusText = (station) => {
+  if (station.last_error) return station.last_error
+  if (station.is_stale) return '数据已过期'
+  if (station.last_success_at) return `采集 ${formatTime(station.last_success_at)}`
+  return '等待首次采集'
+}
+
+const getRainfallStationClasses = (station) => ({
+  'is-selected': station.station_id === weatherStore.rainfallSummary?.selected_station_id,
+  'is-stale': station.is_stale || Boolean(station.last_error),
+})
+
 const refreshStatus = async () => {
   await dashboardStore.refreshAll()
+  await weatherStore.fetchRainfallSummary()
 }
 
 onMounted(async () => {
-  await dashboardStore.refreshAll()
+  await Promise.allSettled([
+    dashboardStore.refreshAll(),
+    weatherStore.fetchRainfallSummary(),
+  ])
   // Auto refresh every 5 seconds for near real-time updates
   refreshInterval = setInterval(() => {
-    dashboardStore.refreshAll()
+    dashboardStore.refreshAll().catch(() => {})
   }, 5000)
+  weatherRefreshInterval = setInterval(() => {
+    weatherStore.fetchRainfallSummary().catch(() => {})
+  }, 60000)
 })
 
 onUnmounted(() => {
   if (refreshInterval) {
     clearInterval(refreshInterval)
+  }
+  if (weatherRefreshInterval) {
+    clearInterval(weatherRefreshInterval)
   }
 })
 </script>
@@ -290,6 +397,108 @@ onUnmounted(() => {
 
 .stats-row {
   margin-bottom: 20px;
+}
+
+.rainfall-row {
+  margin-bottom: 20px;
+}
+
+.rainfall-card {
+  border: none;
+}
+
+.rainfall-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.rainfall-updated {
+  color: #909399;
+  font-size: 12px;
+}
+
+.rainfall-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.rainfall-station {
+  padding: 16px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+
+.rainfall-station.is-selected {
+  border-color: #67c23a;
+  box-shadow: inset 0 0 0 1px rgba(103, 194, 58, 0.24);
+}
+
+.rainfall-station.is-stale {
+  border-color: #f3d19e;
+  background: #fffaf2;
+}
+
+.rainfall-station-head,
+.rainfall-station-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rainfall-station-name {
+  color: #172033;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.rainfall-station-id,
+.rainfall-station-foot {
+  color: #909399;
+  font-size: 12px;
+}
+
+.rainfall-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.rainfall-metric {
+  min-height: 74px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f4f7fb;
+}
+
+.rainfall-metric.actual {
+  background: #ecf5ff;
+}
+
+.metric-label,
+.metric-time {
+  display: block;
+  color: #909399;
+  font-size: 12px;
+}
+
+.metric-value {
+  display: block;
+  margin-top: 6px;
+  color: #1f4f8a;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.metric-time {
+  margin-top: 6px;
 }
 
 .stat-card {
@@ -439,5 +648,15 @@ onUnmounted(() => {
 .reading-value {
   color: #409eff;
   font-weight: 500;
+}
+
+@media (max-width: 900px) {
+  .rainfall-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rainfall-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

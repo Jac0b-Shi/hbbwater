@@ -15,7 +15,7 @@ from app.database import (
     dispose_databases,
     probe_business_database_path,
 )
-from app.routers import sensors, alerts, dashboard, config, account, auth
+from app.routers import sensors, alerts, dashboard, config, account, auth, weather
 from app.services.account import account_service
 from app.services.business_profiles import ensure_business_profiles_bootstrap, profile_to_settings
 from app.services.health_watchdog import (
@@ -23,6 +23,7 @@ from app.services.health_watchdog import (
     start_memory_watchdog,
     stop_watchdog,
 )
+from app.services.weather import start_rainfall_collector
 
 
 @asynccontextmanager
@@ -67,16 +68,20 @@ async def lifespan(app: FastAPI):
             "Control-plane endpoints will remain available."
         )
 
-    watchdog_tasks = [
-        start_business_database_watchdog(),
-        start_memory_watchdog(),
+    background_tasks = [
+        task for task in (
+            start_business_database_watchdog(),
+            start_memory_watchdog(),
+            start_rainfall_collector(),
+        )
+        if task is not None
     ]
 
     yield
 
     print(f"[{datetime.utcnow()}] Flood Monitoring API shutting down...")
-    for watchdog_task in watchdog_tasks:
-        await stop_watchdog(watchdog_task)
+    for background_task in background_tasks:
+        await stop_watchdog(background_task)
     await dispose_databases()
 
 
@@ -152,6 +157,7 @@ app.include_router(dashboard.router, prefix="/api")
 app.include_router(config.router, prefix="/api")
 app.include_router(account.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
+app.include_router(weather.router, prefix="/api")
 
 
 if __name__ == "__main__":

@@ -306,6 +306,62 @@ class SensorTimeSeries(BaseModel):
     data: List[TimeSeriesPoint]
 
 
+# ==================== Weather/Rainfall Schemas ====================
+
+class RainfallStationSummary(BaseModel):
+    station_id: str
+    station_name: str
+    role: str
+    longitude: Optional[float]
+    latitude: Optional[float]
+    is_active: bool
+    last_success_at: Optional[datetime]
+    last_error: str = ""
+    is_stale: bool
+    current_actual_mm: Optional[float]
+    current_actual_time: Optional[datetime]
+    source_updated_at: Optional[datetime]
+    latest_forecast_issued_at: Optional[datetime]
+    forecast_totals: Dict[str, float]
+
+
+class RainfallSummary(BaseModel):
+    stations: List[RainfallStationSummary]
+    selected_station_id: Optional[str]
+    selected_reason: str
+    updated_at: datetime
+    stale_after_seconds: int
+
+
+class RainfallStationResponse(BaseModel):
+    station_id: str
+    station_name: str
+    role: str
+    longitude: Optional[Decimal]
+    latitude: Optional[Decimal]
+    is_active: bool
+    last_success_at: Optional[datetime]
+    last_error: Optional[str] = ""
+
+    class Config:
+        from_attributes = True
+
+
+class RainfallHourlyResponse(BaseModel):
+    station_id: str
+    data_type: str
+    hour_time: datetime
+    rainfall_mm: Decimal
+    batch_time: datetime
+    forecast_issued_at: Optional[datetime]
+    source_endpoint: str
+    raw_time_label: Optional[str] = ""
+    source_updated_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
 # ==================== System Config Schemas ====================
 
 class SystemConfigResponse(BaseModel):

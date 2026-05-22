@@ -96,6 +96,28 @@
         </div>
       </template>
 
+      <div v-if="selectedRainfallStation" class="rainfall-strip" :class="{ 'is-backup': selectedRainfallStation.role === 'backup' }">
+        <div class="rainfall-strip-main">
+          <div class="rainfall-strip-icon">
+            <el-icon><Cloudy /></el-icon>
+          </div>
+          <div>
+            <div class="rainfall-strip-title">
+              {{ selectedRainfallStation.station_name }}
+              <span>{{ selectedRainfallStation.role === 'backup' ? '备份参考' : '主站参考' }}</span>
+            </div>
+            <div class="rainfall-strip-meta">
+              当前实况 {{ formatRainfall(selectedRainfallStation.current_actual_mm) }}
+              · 未来3h {{ formatRainfall(selectedRainfallStation.forecast_totals?.next_3h) }}
+              · 未来24h {{ formatRainfall(selectedRainfallStation.forecast_totals?.next_24h) }}
+            </div>
+          </div>
+        </div>
+        <div class="rainfall-strip-status">
+          {{ getRainfallMapStatus(selectedRainfallStation) }}
+        </div>
+      </div>
+
       <div v-if="unplacedCount || unlockedCount" class="map-notices">
         <el-alert
           v-if="unplacedCount"
@@ -298,6 +320,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAccountStore } from '../stores/account'
 import { useSensorStore } from '../stores/sensors'
+import { useWeatherStore } from '../stores/weather'
 import { SHORT_DATE_TIME_FORMAT, formatUtc8DateTime } from '../utils/time'
 import {
   clampPercent,
@@ -309,6 +332,7 @@ import {
 
 const accountStore = useAccountStore()
 const sensorStore = useSensorStore()
+const weatherStore = useWeatherStore()
 const MAP_ZOOM_STORAGE_KEY = 'hbbwater_water_map_zoom'
 const MIN_MAP_ZOOM = 0.55
 const MAX_MAP_ZOOM = 1.35
@@ -329,6 +353,7 @@ const panelForm = reactive({
 })
 
 let refreshTimer = null
+let rainfallRefreshTimer = null
 
 const statusFilterOptions = [
   { value: 'all', label: '全部状态' },
@@ -457,6 +482,8 @@ const averageRelativeWaterLevel = computed(() => {
   return total / relativeWaterSamples.value.length
 })
 
+const selectedRainfallStation = computed(() => weatherStore.selectedStation)
+
 watch(mapZoom, (value) => {
   const normalized = normalizeZoom(value)
   if (normalized !== value) {
@@ -538,6 +565,18 @@ function formatLastReading(value) {
   return formatUtc8DateTime(value, SHORT_DATE_TIME_FORMAT, '暂无上报')
 }
 
+function formatRainfall(value) {
+  if (value === null || value === undefined) return '-- mm'
+  return `${Number(value).toFixed(1)} mm`
+}
+
+function getRainfallMapStatus(station) {
+  if (station.last_error) return station.last_error
+  if (station.is_stale) return '雨量数据已过期'
+  if (station.current_actual_time) return `实况时次 ${formatLastReading(station.current_actual_time)}`
+  return '等待雨量采集'
+}
+
 function getMarkerClasses(marker) {
   return [
     `status-${marker.status}`,
@@ -602,6 +641,7 @@ async function refreshAll() {
   pageLoading.value = true
   try {
     await sensorStore.fetchSensors()
+    weatherStore.fetchRainfallSummary().catch(() => {})
     await refreshStatuses()
     if (selectedMarker.value) {
       syncPanelForm(selectedMarker.value)
@@ -775,6 +815,9 @@ onMounted(async () => {
   refreshTimer = setInterval(() => {
     refreshStatuses({ quiet: true })
   }, 15000)
+  rainfallRefreshTimer = setInterval(() => {
+    weatherStore.fetchRainfallSummary().catch(() => {})
+  }, 60000)
 })
 
 onUnmounted(() => {
@@ -784,6 +827,9 @@ onUnmounted(() => {
 
   if (refreshTimer) {
     clearInterval(refreshTimer)
+  }
+  if (rainfallRefreshTimer) {
+    clearInterval(rainfallRefreshTimer)
   }
 })
 </script>
@@ -899,6 +945,69 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.rainfall-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #f0f7ff;
+}
+
+.rainfall-strip.is-backup {
+  border-color: #d8dce6;
+  background: #f6f8fb;
+}
+
+.rainfall-strip-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.rainfall-strip-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: #fff;
+  background: #2563eb;
+}
+
+.rainfall-strip-title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.rainfall-strip-title span {
+  margin-left: 8px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.rainfall-strip-meta,
+.rainfall-strip-status {
+  margin-top: 4px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rainfall-strip-status {
+  margin-top: 0;
+  text-align: right;
+  flex: 0 0 auto;
 }
 
 .zoom-controls {
@@ -1328,6 +1437,15 @@ onUnmounted(() => {
   .zoom-controls {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .rainfall-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .rainfall-strip-status {
+    text-align: left;
   }
 
   .zoom-slider {
