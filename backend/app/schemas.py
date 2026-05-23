@@ -362,6 +362,21 @@ class RainfallHourlyResponse(BaseModel):
         from_attributes = True
 
 
+class RainfallActualRevisionResponse(BaseModel):
+    station_id: str
+    hour_time: datetime
+    old_rainfall_mm: Decimal
+    new_rainfall_mm: Decimal
+    previous_source_updated_at: Optional[datetime]
+    source_updated_at: Optional[datetime]
+    detected_at: datetime
+    source_endpoint: str
+    raw_time_label: Optional[str] = ""
+
+    class Config:
+        from_attributes = True
+
+
 # ==================== System Config Schemas ====================
 
 class SystemConfigResponse(BaseModel):

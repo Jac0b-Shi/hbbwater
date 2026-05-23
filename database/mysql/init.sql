@@ -98,6 +98,56 @@ CREATE TABLE IF NOT EXISTS rainfall_hourly (
     INDEX idx_rainfall_station_batch (station_id, data_type, batch_time)
 ) ENGINE=InnoDB COMMENT='小时雨量实况与预测表';
 
+CREATE TABLE IF NOT EXISTS rainfall_actual_hourly (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL COMMENT '知天气站点ID',
+    hour_time TIMESTAMP NOT NULL COMMENT '小时起始时间(UTC)',
+    rainfall_mm DECIMAL(10,2) NOT NULL COMMENT '小时实况雨量(mm)',
+    source_endpoint VARCHAR(100) NOT NULL DEFAULT 'fycx_trend_sta' COMMENT '来源接口',
+    raw_time_label VARCHAR(50) DEFAULT '' COMMENT '源接口原始时次标签',
+    source_updated_at TIMESTAMP NULL DEFAULT NULL COMMENT '源接口更新时间',
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '首次采集到该小时值的时间',
+    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '最近一次采集到该小时值的时间',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_rainfall_actual_station_hour (station_id, hour_time),
+    INDEX idx_rainfall_actual_station_hour (station_id, hour_time),
+    INDEX idx_rainfall_actual_last_seen (last_seen_at)
+) ENGINE=InnoDB COMMENT='小时雨量实况最新值表';
+
+CREATE TABLE IF NOT EXISTS rainfall_forecast_hourly (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL COMMENT '知天气站点ID',
+    hour_time TIMESTAMP NOT NULL COMMENT '小时起始时间(UTC)',
+    rainfall_mm DECIMAL(10,2) NOT NULL COMMENT '小时预报雨量(mm)',
+    batch_time TIMESTAMP NOT NULL COMMENT '当前保留的预报批次时间',
+    forecast_issued_at TIMESTAMP NULL DEFAULT NULL COMMENT '预报批次发布时间',
+    source_endpoint VARCHAR(100) NOT NULL DEFAULT 'fycx_trend_sta' COMMENT '来源接口',
+    raw_time_label VARCHAR(50) DEFAULT '' COMMENT '源接口原始时次标签',
+    source_updated_at TIMESTAMP NULL DEFAULT NULL COMMENT '源接口更新时间',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_rainfall_forecast_station_hour (station_id, hour_time),
+    INDEX idx_rainfall_forecast_station_hour (station_id, hour_time),
+    INDEX idx_rainfall_forecast_station_batch (station_id, batch_time)
+) ENGINE=InnoDB COMMENT='未来24小时滚动雨量预报表';
+
+CREATE TABLE IF NOT EXISTS rainfall_actual_revisions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL COMMENT '知天气站点ID',
+    hour_time TIMESTAMP NOT NULL COMMENT '被修正的小时起始时间(UTC)',
+    old_rainfall_mm DECIMAL(10,2) NOT NULL COMMENT '旧实况雨量(mm)',
+    new_rainfall_mm DECIMAL(10,2) NOT NULL COMMENT '新实况雨量(mm)',
+    previous_source_updated_at TIMESTAMP NULL DEFAULT NULL COMMENT '旧值来源更新时间',
+    source_updated_at TIMESTAMP NULL DEFAULT NULL COMMENT '新值来源更新时间',
+    detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发现修正的时间',
+    source_endpoint VARCHAR(100) NOT NULL DEFAULT 'fycx_trend_sta' COMMENT '来源接口',
+    raw_time_label VARCHAR(50) DEFAULT '' COMMENT '源接口原始时次标签',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_rainfall_revision_station_hour (station_id, hour_time),
+    INDEX idx_rainfall_revision_detected (detected_at)
+) ENGINE=InnoDB COMMENT='小时雨量实况修正记录表';
+
 -- 传感器原始数据表（热数据，≤14天）
 CREATE TABLE IF NOT EXISTS sensor_readings (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,

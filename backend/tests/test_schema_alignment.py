@@ -19,7 +19,14 @@ try:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.database import BusinessBase
-    from app.models import RainfallHourly, Sensor, WeatherStation, WebhookGroup
+    from app.models import (
+        RainfallActualHourly,
+        RainfallForecastHourly,
+        RainfallHourly,
+        Sensor,
+        WeatherStation,
+        WebhookGroup,
+    )
     from app.services.schema import ensure_runtime_schema
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
     IMPORT_ERROR = exc
@@ -113,6 +120,22 @@ class SchemaAlignmentTests(unittest.IsolatedAsyncioTestCase):
             session.add(rainfall)
             await session.commit()
             self.assertIsNotNone(rainfall.id)
+
+            actual = RainfallActualHourly(
+                station_id="A5151",
+                hour_time=datetime(2026, 5, 22, 10),
+                rainfall_mm=Decimal("0.1"),
+            )
+            forecast = RainfallForecastHourly(
+                station_id="A5151",
+                hour_time=datetime(2026, 5, 22, 11),
+                rainfall_mm=Decimal("0.2"),
+                batch_time=datetime(2026, 5, 22, 10),
+            )
+            session.add_all([actual, forecast])
+            await session.commit()
+            self.assertIsNotNone(actual.id)
+            self.assertIsNotNone(forecast.id)
 
 
 if __name__ == "__main__":

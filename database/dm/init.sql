@@ -100,6 +100,59 @@ CREATE TABLE rainfall_hourly (
 CREATE INDEX idx_rainfall_station_type_hour ON rainfall_hourly (station_id, data_type, hour_time);
 CREATE INDEX idx_rainfall_station_batch ON rainfall_hourly (station_id, data_type, batch_time);
 
+CREATE TABLE rainfall_actual_hourly (
+    id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL,
+    hour_time TIMESTAMP NOT NULL,
+    rainfall_mm DECIMAL(10,2) NOT NULL,
+    source_endpoint VARCHAR(100) DEFAULT 'fycx_trend_sta' NOT NULL,
+    raw_time_label VARCHAR(50) DEFAULT '',
+    source_updated_at TIMESTAMP,
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_rainfall_actual_station_hour UNIQUE (station_id, hour_time)
+);
+
+CREATE INDEX idx_rainfall_actual_station_hour ON rainfall_actual_hourly (station_id, hour_time);
+CREATE INDEX idx_rainfall_actual_last_seen ON rainfall_actual_hourly (last_seen_at);
+
+CREATE TABLE rainfall_forecast_hourly (
+    id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL,
+    hour_time TIMESTAMP NOT NULL,
+    rainfall_mm DECIMAL(10,2) NOT NULL,
+    batch_time TIMESTAMP NOT NULL,
+    forecast_issued_at TIMESTAMP,
+    source_endpoint VARCHAR(100) DEFAULT 'fycx_trend_sta' NOT NULL,
+    raw_time_label VARCHAR(50) DEFAULT '',
+    source_updated_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_rainfall_forecast_station_hour UNIQUE (station_id, hour_time)
+);
+
+CREATE INDEX idx_rainfall_forecast_station_hour ON rainfall_forecast_hourly (station_id, hour_time);
+CREATE INDEX idx_rainfall_forecast_station_batch ON rainfall_forecast_hourly (station_id, batch_time);
+
+CREATE TABLE rainfall_actual_revisions (
+    id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    station_id VARCHAR(50) NOT NULL,
+    hour_time TIMESTAMP NOT NULL,
+    old_rainfall_mm DECIMAL(10,2) NOT NULL,
+    new_rainfall_mm DECIMAL(10,2) NOT NULL,
+    previous_source_updated_at TIMESTAMP,
+    source_updated_at TIMESTAMP,
+    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    source_endpoint VARCHAR(100) DEFAULT 'fycx_trend_sta' NOT NULL,
+    raw_time_label VARCHAR(50) DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_rainfall_revision_station_hour ON rainfall_actual_revisions (station_id, hour_time);
+CREATE INDEX idx_rainfall_revision_detected ON rainfall_actual_revisions (detected_at);
+
 CREATE TABLE sensor_readings (
     id BIGINT IDENTITY(1,1) PRIMARY KEY,
     sensor_id VARCHAR(50) NOT NULL,

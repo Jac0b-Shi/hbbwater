@@ -192,6 +192,12 @@ caddy run --config Caddyfile
 - `GET /api/dashboard/recent-readings` - 获取最近读数
 - `GET /api/dashboard/alerts/recent` - 获取最近告警
 
+### 天气雨量
+
+- `GET /api/weather/rainfall/summary` - 获取当前实况雨量与未来 1/3/6/24 小时预报累计
+- `GET /api/weather/rainfall/history` - 查询实况小时雨量和当前滚动预报小时值
+- `GET /api/weather/rainfall/revisions` - 查询实况小时雨量后续修正记录
+
 ## 数据库架构
 
 ### 分级存储策略
@@ -199,6 +205,9 @@ caddy run --config Caddyfile
 - **热数据** (`sensor_readings`): 最近14天的原始数据，支持高频查询
 - **归档数据** (`sensor_readings_archive`): 超过14天的历史数据
 - **汇总数据** (`sensor_summary_hourly/daily`): 小时/日统计数据
+- **雨量实况** (`rainfall_actual_hourly`): 每个气象站每小时一条最新实况值
+- **雨量预报** (`rainfall_forecast_hourly`): 滚动保留当前小时起未来24小时预报值
+- **实况修正** (`rainfall_actual_revisions`): 仅记录同站同小时实况值发生变化的修正日志
 
 ### 自动维护
 

@@ -6,6 +6,7 @@
 - 仓库已经完成应用层数据库连接解耦，可通过 `DATABASE_URL` 或 `DB_DIALECT`/`DB_DRIVER` 切换方言入口。
 - 后端结构化配置已支持达梦服务名模式，可通过 `DB_SERVICE_NAME` + `DM_SVC_PATH` 连接单位下发的高可用集群。
 - 已提供 `init.sql` 首版，覆盖基础建表、索引和默认数据。
+- 已提供 `20260523_weather_rainfall_split.sql`，用于把雨量实况、滚动预报和实况修正日志拆到独立表，并从旧 `rainfall_hourly` 回填当前值。
 - 达梦默认不再走 ORM 自动建表；空库请先执行 `database/dm/init.sql`，否则 API 启动时会直接报错提示缺失基础表。
 - `docker-compose.yml` 仍保留 MySQL + WordPress 默认拓扑，但后端已支持通过 `BACKEND_DB_*` 切换业务库，并通过 `BACKEND_CONTROL_DATABASE_URL` 把控制库持久化到 SQLite。
 - 如果后端运行在 Linux 容器中，还需要额外制作带 DM 客户端和 Python 驱动的镜像；仓库现已提供 `backend/Dockerfile.dm` 模板以及 Windows / Linux 安装脚本。
