@@ -5,6 +5,7 @@
 - `mysql/init.sql`
 - `mysql/procedures.sql`
 - `dm/init.sql`
+- `dm/20260523_weather_rainfall_split.sql`
 - `dm/DEPLOY.md`
 - `dm/README.md`
 - `../.env.dm.example`

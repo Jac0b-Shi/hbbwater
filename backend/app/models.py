@@ -248,6 +248,71 @@ class RainfallHourly(BusinessBase):
     )
 
 
+class RainfallActualHourly(BusinessBase):
+    __tablename__ = "rainfall_actual_hourly"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    station_id = Column(String(50), nullable=False, index=True)
+    hour_time = Column(DateTime, nullable=False)
+    rainfall_mm = Column(DECIMAL(10, 2), nullable=False)
+    source_endpoint = Column(String(100), nullable=False, default="fycx_trend_sta")
+    raw_time_label = Column(String(50), default="")
+    source_updated_at = Column(DateTime, nullable=True)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("uk_rainfall_actual_station_hour", "station_id", "hour_time", unique=True),
+        Index("idx_rainfall_actual_station_hour", "station_id", "hour_time"),
+        Index("idx_rainfall_actual_last_seen", "last_seen_at"),
+    )
+
+
+class RainfallForecastHourly(BusinessBase):
+    __tablename__ = "rainfall_forecast_hourly"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    station_id = Column(String(50), nullable=False, index=True)
+    hour_time = Column(DateTime, nullable=False)
+    rainfall_mm = Column(DECIMAL(10, 2), nullable=False)
+    batch_time = Column(DateTime, nullable=False)
+    forecast_issued_at = Column(DateTime, nullable=True)
+    source_endpoint = Column(String(100), nullable=False, default="fycx_trend_sta")
+    raw_time_label = Column(String(50), default="")
+    source_updated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("uk_rainfall_forecast_station_hour", "station_id", "hour_time", unique=True),
+        Index("idx_rainfall_forecast_station_hour", "station_id", "hour_time"),
+        Index("idx_rainfall_forecast_station_batch", "station_id", "batch_time"),
+    )
+
+
+class RainfallActualRevision(BusinessBase):
+    __tablename__ = "rainfall_actual_revisions"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    station_id = Column(String(50), nullable=False, index=True)
+    hour_time = Column(DateTime, nullable=False)
+    old_rainfall_mm = Column(DECIMAL(10, 2), nullable=False)
+    new_rainfall_mm = Column(DECIMAL(10, 2), nullable=False)
+    previous_source_updated_at = Column(DateTime, nullable=True)
+    source_updated_at = Column(DateTime, nullable=True)
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    source_endpoint = Column(String(100), nullable=False, default="fycx_trend_sta")
+    raw_time_label = Column(String(50), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_rainfall_revision_station_hour", "station_id", "hour_time"),
+        Index("idx_rainfall_revision_detected", "detected_at"),
+    )
+
+
 class SystemConfig(ControlBase):
     __tablename__ = "system_config"
     

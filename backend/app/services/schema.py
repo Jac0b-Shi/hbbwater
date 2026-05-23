@@ -5,7 +5,14 @@ from sqlalchemy import DECIMAL, Integer, String, bindparam, column, inspect, sel
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.models import RainfallHourly, WeatherStation, WebhookGroup
+from app.models import (
+    RainfallActualHourly,
+    RainfallActualRevision,
+    RainfallForecastHourly,
+    RainfallHourly,
+    WeatherStation,
+    WebhookGroup,
+)
 
 
 DEFAULT_WEATHER_STATIONS = (
@@ -210,6 +217,116 @@ async def _ensure_weather_tables(conn: AsyncConnection) -> None:
         await conn.run_sync(lambda sync_conn: WeatherStation.__table__.create(sync_conn, checkfirst=True))
     if not await _table_exists(conn, "rainfall_hourly"):
         await conn.run_sync(lambda sync_conn: RainfallHourly.__table__.create(sync_conn, checkfirst=True))
+    if not await _table_exists(conn, "rainfall_actual_hourly"):
+        await conn.run_sync(lambda sync_conn: RainfallActualHourly.__table__.create(sync_conn, checkfirst=True))
+    if not await _table_exists(conn, "rainfall_forecast_hourly"):
+        await conn.run_sync(lambda sync_conn: RainfallForecastHourly.__table__.create(sync_conn, checkfirst=True))
+    if not await _table_exists(conn, "rainfall_actual_revisions"):
+        await conn.run_sync(lambda sync_conn: RainfallActualRevision.__table__.create(sync_conn, checkfirst=True))
+
+
+async def _backfill_split_rainfall_tables(conn: AsyncConnection) -> None:
+    if not await _table_exists(conn, "rainfall_hourly"):
+        return
+
+    await conn.execute(
+        text(
+            """
+            INSERT INTO rainfall_actual_hourly (
+                station_id,
+                hour_time,
+                rainfall_mm,
+                source_endpoint,
+                raw_time_label,
+                source_updated_at,
+                first_seen_at,
+                last_seen_at,
+                created_at,
+                updated_at
+            )
+            SELECT
+                src.station_id,
+                src.hour_time,
+                src.rainfall_mm,
+                src.source_endpoint,
+                src.raw_time_label,
+                src.source_updated_at,
+                src.created_at,
+                src.updated_at,
+                src.created_at,
+                src.updated_at
+            FROM (
+                SELECT
+                    r.station_id,
+                    r.hour_time,
+                    r.rainfall_mm,
+                    r.source_endpoint,
+                    r.raw_time_label,
+                    r.source_updated_at,
+                    r.created_at,
+                    r.updated_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY r.station_id, r.hour_time
+                        ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
+                    ) AS rn
+                FROM rainfall_hourly r
+                WHERE r.data_type = 'actual'
+            ) src
+            WHERE src.rn = 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM rainfall_actual_hourly existing
+                  WHERE existing.station_id = src.station_id
+                    AND existing.hour_time = src.hour_time
+              )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            INSERT INTO rainfall_forecast_hourly (
+                station_id,
+                hour_time,
+                rainfall_mm,
+                batch_time,
+                forecast_issued_at,
+                source_endpoint,
+                raw_time_label,
+                source_updated_at,
+                created_at,
+                updated_at
+            )
+            SELECT
+                r.station_id,
+                r.hour_time,
+                r.rainfall_mm,
+                r.batch_time,
+                r.forecast_issued_at,
+                r.source_endpoint,
+                r.raw_time_label,
+                r.source_updated_at,
+                r.created_at,
+                r.updated_at
+            FROM rainfall_hourly r
+            JOIN (
+                SELECT station_id, MAX(batch_time) AS latest_batch
+                FROM rainfall_hourly
+                WHERE data_type = 'forecast'
+                GROUP BY station_id
+            ) latest
+                ON latest.station_id = r.station_id
+               AND latest.latest_batch = r.batch_time
+            WHERE r.data_type = 'forecast'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM rainfall_forecast_hourly existing
+                  WHERE existing.station_id = r.station_id
+                    AND existing.hour_time = r.hour_time
+              )
+            """
+        )
+    )
 
 
 async def _ensure_default_weather_stations(conn: AsyncConnection) -> None:
@@ -273,6 +390,9 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
             "webhook_groups",
             "weather_stations",
             "rainfall_hourly",
+            "rainfall_actual_hourly",
+            "rainfall_forecast_hourly",
+            "rainfall_actual_revisions",
         }
         missing_tables = sorted(required_tables - existing_tables)
         if missing_tables:
@@ -284,6 +404,7 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
     else:
         await _ensure_weather_tables(conn)
 
+    await _backfill_split_rainfall_tables(conn)
     await _ensure_default_weather_stations(conn)
 
     if not await _table_exists(conn, "webhook_groups"):

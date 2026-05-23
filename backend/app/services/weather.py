@@ -15,7 +15,7 @@ from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import business_session_scope
-from app.models import RainfallHourly, WeatherStation
+from app.models import RainfallActualHourly, RainfallForecastHourly, WeatherStation
 from app.services.schema import DEFAULT_WEATHER_STATIONS
 
 SHANGHAI_TZ = timezone(timedelta(hours=8))
@@ -23,6 +23,7 @@ DEFAULT_ZTQ_ENDPOINT = "http://ztq.soweather.com:8096/ztq_sh_jc/service.do"
 ZTQ_APP_ID = "com.pcs.ztqsh"
 ZTQ_APP_VERSION = "1.3.7"
 ZTQ_ANDROID_CODE = "34"
+FORECAST_RETENTION_HOURS = 24
 
 
 @dataclass(frozen=True)
@@ -407,8 +408,16 @@ async def ensure_weather_station_rows(db: AsyncSession, configs: list[WeatherSta
     return rows
 
 
-async def _upsert_rainfall_points(db: AsyncSession, points: list[RainfallPoint]) -> int:
-    """Upsert rainfall points with single-row SQL to avoid DM driver batch-update crashes."""
+def _reference_to_utc_naive(value: datetime | None) -> datetime:
+    if value is None:
+        return utcnow_naive()
+    if value.tzinfo is None:
+        return value.replace(microsecond=0)
+    return value.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
+
+
+async def _upsert_actual_points(db: AsyncSession, points: list[RainfallPoint]) -> int:
+    """Upsert actual rainfall and write a revision only when the value changes."""
     if not points:
         return 0
 
@@ -417,56 +426,51 @@ async def _upsert_rainfall_points(db: AsyncSession, points: list[RainfallPoint])
     for point in points:
         params = {
             "station_id": point.station_id,
-            "data_type": point.data_type,
             "hour_time": point.hour_time,
             "rainfall_mm": str(point.rainfall_mm),
-            "batch_time": point.batch_time,
-            "forecast_issued_at": point.forecast_issued_at,
             "source_endpoint": "fycx_trend_sta",
             "raw_time_label": point.raw_time_label[:50],
             "source_updated_at": point.source_updated_at,
+            "seen_at": now,
             "created_at": now,
             "updated_at": now,
         }
-        row_id = await db.scalar(
+        result = await db.execute(
             text(
                 """
-                SELECT id
-                FROM rainfall_hourly
+                SELECT id, rainfall_mm, source_updated_at
+                FROM rainfall_actual_hourly
                 WHERE station_id = :station_id
-                  AND data_type = :data_type
                   AND hour_time = :hour_time
-                  AND batch_time = :batch_time
                 """
             ),
             params,
         )
-        if row_id is None:
+        existing = result.mappings().first()
+        if existing is None:
             await db.execute(
                 text(
                     """
-                    INSERT INTO rainfall_hourly (
+                    INSERT INTO rainfall_actual_hourly (
                         station_id,
-                        data_type,
                         hour_time,
                         rainfall_mm,
-                        batch_time,
-                        forecast_issued_at,
                         source_endpoint,
                         raw_time_label,
                         source_updated_at,
+                        first_seen_at,
+                        last_seen_at,
                         created_at,
                         updated_at
                     ) VALUES (
                         :station_id,
-                        :data_type,
                         :hour_time,
                         :rainfall_mm,
-                        :batch_time,
-                        :forecast_issued_at,
                         :source_endpoint,
                         :raw_time_label,
                         :source_updated_at,
+                        :seen_at,
+                        :seen_at,
                         :created_at,
                         :updated_at
                     )
@@ -477,23 +481,204 @@ async def _upsert_rainfall_points(db: AsyncSession, points: list[RainfallPoint])
             inserted += 1
             continue
 
+        old_value = _to_decimal(existing["rainfall_mm"])
+        if old_value != point.rainfall_mm:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO rainfall_actual_revisions (
+                        station_id,
+                        hour_time,
+                        old_rainfall_mm,
+                        new_rainfall_mm,
+                        previous_source_updated_at,
+                        source_updated_at,
+                        detected_at,
+                        source_endpoint,
+                        raw_time_label,
+                        created_at
+                    ) VALUES (
+                        :station_id,
+                        :hour_time,
+                        :old_rainfall_mm,
+                        :new_rainfall_mm,
+                        :previous_source_updated_at,
+                        :source_updated_at,
+                        :detected_at,
+                        :source_endpoint,
+                        :raw_time_label,
+                        :created_at
+                    )
+                    """
+                ),
+                {
+                    **params,
+                    "old_rainfall_mm": str(old_value),
+                    "new_rainfall_mm": str(point.rainfall_mm),
+                    "previous_source_updated_at": existing["source_updated_at"],
+                    "detected_at": now,
+                },
+            )
+
         await db.execute(
             text(
                 """
-                UPDATE rainfall_hourly
+                UPDATE rainfall_actual_hourly
                 SET rainfall_mm = :rainfall_mm,
-                    forecast_issued_at = :forecast_issued_at,
                     source_endpoint = :source_endpoint,
                     raw_time_label = :raw_time_label,
                     source_updated_at = :source_updated_at,
+                    last_seen_at = :seen_at,
                     updated_at = :updated_at
                 WHERE id = :row_id
                 """
             ),
-            {**params, "row_id": row_id},
+            {**params, "row_id": existing["id"]},
         )
 
     return inserted
+
+
+async def _upsert_forecast_points(
+    db: AsyncSession,
+    points: list[RainfallPoint],
+    *,
+    window_start: datetime,
+) -> int:
+    """Keep only the latest rolling 24-hour forecast for each station."""
+    if not points:
+        return 0
+
+    now = utcnow_naive()
+    inserted = 0
+    window_end = window_start + timedelta(hours=FORECAST_RETENTION_HOURS)
+    station_ids = sorted({point.station_id for point in points})
+
+    for station_id in station_ids:
+        station_points = [
+            point
+            for point in points
+            if point.station_id == station_id and window_start <= point.hour_time < window_end
+        ]
+        if not station_points:
+            continue
+
+        latest_batch = max(point.batch_time for point in station_points)
+        for point in station_points:
+            params = {
+                "station_id": point.station_id,
+                "hour_time": point.hour_time,
+                "rainfall_mm": str(point.rainfall_mm),
+                "batch_time": point.batch_time,
+                "forecast_issued_at": point.forecast_issued_at,
+                "source_endpoint": "fycx_trend_sta",
+                "raw_time_label": point.raw_time_label[:50],
+                "source_updated_at": point.source_updated_at,
+                "created_at": now,
+                "updated_at": now,
+            }
+            row_id = await db.scalar(
+                text(
+                    """
+                    SELECT id
+                    FROM rainfall_forecast_hourly
+                    WHERE station_id = :station_id
+                      AND hour_time = :hour_time
+                    """
+                ),
+                params,
+            )
+            if row_id is None:
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO rainfall_forecast_hourly (
+                            station_id,
+                            hour_time,
+                            rainfall_mm,
+                            batch_time,
+                            forecast_issued_at,
+                            source_endpoint,
+                            raw_time_label,
+                            source_updated_at,
+                            created_at,
+                            updated_at
+                        ) VALUES (
+                            :station_id,
+                            :hour_time,
+                            :rainfall_mm,
+                            :batch_time,
+                            :forecast_issued_at,
+                            :source_endpoint,
+                            :raw_time_label,
+                            :source_updated_at,
+                            :created_at,
+                            :updated_at
+                        )
+                        """
+                    ),
+                    params,
+                )
+                inserted += 1
+                continue
+
+            await db.execute(
+                text(
+                    """
+                    UPDATE rainfall_forecast_hourly
+                    SET rainfall_mm = :rainfall_mm,
+                        batch_time = :batch_time,
+                        forecast_issued_at = :forecast_issued_at,
+                        source_endpoint = :source_endpoint,
+                        raw_time_label = :raw_time_label,
+                        source_updated_at = :source_updated_at,
+                        updated_at = :updated_at
+                    WHERE id = :row_id
+                    """
+                ),
+                {**params, "row_id": row_id},
+            )
+
+        await db.execute(
+            text(
+                """
+                DELETE FROM rainfall_forecast_hourly
+                WHERE station_id = :station_id
+                  AND (
+                    hour_time < :window_start
+                    OR hour_time >= :window_end
+                    OR batch_time <> :latest_batch
+                  )
+                """
+            ),
+            {
+                "station_id": station_id,
+                "window_start": window_start,
+                "window_end": window_end,
+                "latest_batch": latest_batch,
+            },
+        )
+
+    return inserted
+
+
+async def _upsert_rainfall_points(
+    db: AsyncSession,
+    points: list[RainfallPoint],
+    *,
+    reference_now: datetime | None = None,
+) -> int:
+    """Persist split actual/forecast rainfall points."""
+    if not points:
+        return 0
+
+    actual_points = [point for point in points if point.data_type == "actual"]
+    forecast_points = [point for point in points if point.data_type == "forecast"]
+    window_start = floor_to_hour(_reference_to_utc_naive(reference_now))
+    return (
+        await _upsert_actual_points(db, actual_points)
+        + await _upsert_forecast_points(db, forecast_points, window_start=window_start)
+    )
 
 
 async def _mark_weather_station_success(db: AsyncSession, station_id: str, collected_at: datetime) -> None:
@@ -587,7 +772,7 @@ async def collect_rainfall_once(
                 current_data,
                 reference_now=reference_now,
             )
-            await _upsert_rainfall_points(db, payload.points)
+            await _upsert_rainfall_points(db, payload.points, reference_now=reference_now)
             point_count += len(payload.points)
             has_positive_rainfall = has_positive_rainfall or payload.has_positive_rainfall
 
@@ -649,30 +834,26 @@ def start_rainfall_collector() -> asyncio.Task[None] | None:
 async def build_station_summary(db: AsyncSession, station: WeatherStation) -> dict[str, Any]:
     now = utcnow_naive()
     current_result = await db.execute(
-        select(RainfallHourly)
-        .where(RainfallHourly.station_id == station.station_id)
-        .where(RainfallHourly.data_type == "actual")
-        .order_by(desc(RainfallHourly.hour_time))
+        select(RainfallActualHourly)
+        .where(RainfallActualHourly.station_id == station.station_id)
+        .order_by(desc(RainfallActualHourly.hour_time))
         .limit(1)
     )
     current = current_result.scalar_one_or_none()
 
     latest_batch_result = await db.execute(
-        select(RainfallHourly.batch_time)
-        .where(RainfallHourly.station_id == station.station_id)
-        .where(RainfallHourly.data_type == "forecast")
-        .order_by(desc(RainfallHourly.batch_time))
+        select(RainfallForecastHourly.batch_time)
+        .where(RainfallForecastHourly.station_id == station.station_id)
+        .order_by(desc(RainfallForecastHourly.batch_time))
         .limit(1)
     )
     latest_batch = latest_batch_result.scalar_one_or_none()
-    forecast_rows: list[RainfallHourly] = []
+    forecast_rows: list[RainfallForecastHourly] = []
     if latest_batch is not None:
         forecast_result = await db.execute(
-            select(RainfallHourly)
-            .where(RainfallHourly.station_id == station.station_id)
-            .where(RainfallHourly.data_type == "forecast")
-            .where(RainfallHourly.batch_time == latest_batch)
-            .order_by(RainfallHourly.hour_time)
+            select(RainfallForecastHourly)
+            .where(RainfallForecastHourly.station_id == station.station_id)
+            .order_by(RainfallForecastHourly.hour_time)
         )
         forecast_rows = list(forecast_result.scalars().all())
 
