@@ -407,59 +407,91 @@ async def ensure_weather_station_rows(db: AsyncSession, configs: list[WeatherSta
     return rows
 
 
-def _rainfall_point_key(point: RainfallPoint) -> tuple[str, str, datetime, datetime]:
-    return (point.station_id, point.data_type, point.hour_time, point.batch_time)
-
-
-def _rainfall_row_key(row: RainfallHourly) -> tuple[str, str, datetime, datetime]:
-    return (row.station_id, row.data_type, row.hour_time, row.batch_time)
-
-
 async def _upsert_rainfall_points(db: AsyncSession, points: list[RainfallPoint]) -> int:
-    """Upsert rainfall points with one bounded lookup instead of a SELECT per point."""
+    """Upsert rainfall points with single-row SQL to avoid DM driver batch-update crashes."""
     if not points:
         return 0
 
-    result = await db.execute(
-        select(RainfallHourly).where(
-            RainfallHourly.station_id.in_({point.station_id for point in points}),
-            RainfallHourly.data_type.in_({point.data_type for point in points}),
-            RainfallHourly.hour_time.in_({point.hour_time for point in points}),
-            RainfallHourly.batch_time.in_({point.batch_time for point in points}),
-        )
-    )
-    rows_by_key = {
-        _rainfall_row_key(row): row
-        for row in result.scalars().all()
-    }
     now = utcnow_naive()
     inserted = 0
     for point in points:
-        row = rows_by_key.get(_rainfall_point_key(point))
-        if row is None:
-            db.add(
-                RainfallHourly(
-                    station_id=point.station_id,
-                    data_type=point.data_type,
-                    hour_time=point.hour_time,
-                    rainfall_mm=point.rainfall_mm,
-                    batch_time=point.batch_time,
-                    forecast_issued_at=point.forecast_issued_at,
-                    source_endpoint="fycx_trend_sta",
-                    raw_time_label=point.raw_time_label,
-                    source_updated_at=point.source_updated_at,
-                    created_at=now,
-                    updated_at=now,
-                )
+        params = {
+            "station_id": point.station_id,
+            "data_type": point.data_type,
+            "hour_time": point.hour_time,
+            "rainfall_mm": str(point.rainfall_mm),
+            "batch_time": point.batch_time,
+            "forecast_issued_at": point.forecast_issued_at,
+            "source_endpoint": "fycx_trend_sta",
+            "raw_time_label": point.raw_time_label[:50],
+            "source_updated_at": point.source_updated_at,
+            "created_at": now,
+            "updated_at": now,
+        }
+        row_id = await db.scalar(
+            text(
+                """
+                SELECT id
+                FROM rainfall_hourly
+                WHERE station_id = :station_id
+                  AND data_type = :data_type
+                  AND hour_time = :hour_time
+                  AND batch_time = :batch_time
+                """
+            ),
+            params,
+        )
+        if row_id is None:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO rainfall_hourly (
+                        station_id,
+                        data_type,
+                        hour_time,
+                        rainfall_mm,
+                        batch_time,
+                        forecast_issued_at,
+                        source_endpoint,
+                        raw_time_label,
+                        source_updated_at,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        :station_id,
+                        :data_type,
+                        :hour_time,
+                        :rainfall_mm,
+                        :batch_time,
+                        :forecast_issued_at,
+                        :source_endpoint,
+                        :raw_time_label,
+                        :source_updated_at,
+                        :created_at,
+                        :updated_at
+                    )
+                    """
+                ),
+                params,
             )
             inserted += 1
             continue
 
-        row.rainfall_mm = point.rainfall_mm
-        row.forecast_issued_at = point.forecast_issued_at
-        row.raw_time_label = point.raw_time_label
-        row.source_updated_at = point.source_updated_at
-        row.updated_at = now
+        await db.execute(
+            text(
+                """
+                UPDATE rainfall_hourly
+                SET rainfall_mm = :rainfall_mm,
+                    forecast_issued_at = :forecast_issued_at,
+                    source_endpoint = :source_endpoint,
+                    raw_time_label = :raw_time_label,
+                    source_updated_at = :source_updated_at,
+                    updated_at = :updated_at
+                WHERE id = :row_id
+                """
+            ),
+            {**params, "row_id": row_id},
+        )
 
     return inserted
 
