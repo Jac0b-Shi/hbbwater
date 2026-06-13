@@ -31,7 +31,7 @@
             :closable="false"
             class="mb-4"
           />
-          <el-form :model="profileForm" label-width="100px" :disabled="accountStore.profile && !accountStore.profile.can_update_profile">
+          <el-form :model="profileForm" :label-width="isMobile ? 'auto' : '100px'" :label-position="isMobile ? 'top' : 'right'" :disabled="accountStore.profile && !accountStore.profile.can_update_profile">
             <el-form-item label="登录名">
               <el-input v-model="profileForm.username" placeholder="请输入用户名" />
             </el-form-item>
@@ -70,7 +70,7 @@
             :closable="false"
             class="mb-4"
           />
-          <el-form :model="passwordForm" label-width="100px" :disabled="!accountStore.profile?.can_change_password">
+          <el-form :model="passwordForm" :label-width="isMobile ? 'auto' : '100px'" :label-position="isMobile ? 'top' : 'right'" :disabled="!accountStore.profile?.can_change_password">
             <el-form-item :label="accountStore.profile?.password_initialized ? '当前密码' : '当前密码(留空)'">
               <el-input v-model="passwordForm.current" type="password" show-password :placeholder="accountStore.profile?.password_initialized ? '请输入当前密码' : '首次设置时可留空'" />
             </el-form-item>
@@ -127,9 +127,11 @@ import { ElMessage } from 'element-plus'
 import { UserFilled, Message, Phone, Timer, Connection, Key } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import { validatePassword } from '../utils/password'
+import { useResponsive } from '../composables/useResponsive'
 import { formatUtc8DateTime } from '../utils/time'
 
 const accountStore = useAccountStore()
+const { isMobile } = useResponsive()
 const profileForm = ref({
   username: '',
   display_name: '',
@@ -295,5 +297,35 @@ watch(() => accountStore.profile, syncProfileForm)
 
 .mt-4 {
   margin-top: 20px;
+}
+
+@media (max-width: 767px) {
+  .profile-page :deep(.el-col + .el-col) {
+    margin-top: 12px;
+  }
+
+  .profile-info {
+    padding: 16px 8px;
+  }
+
+  .profile-info p {
+    align-items: flex-start;
+    overflow-wrap: anywhere;
+  }
+
+  .provider-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .profile-page :deep(.el-form-item__label) {
+    margin-bottom: 4px;
+  }
+
+  .profile-page :deep(.el-form-item .el-button) {
+    width: 100%;
+    min-height: 42px;
+    margin-left: 0;
+  }
 }
 </style>

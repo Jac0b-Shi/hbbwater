@@ -8,9 +8,9 @@
       </template>
 
       <!-- Filter Form -->
-      <el-form :model="filterForm" inline class="filter-form">
+      <el-form :model="filterForm" :inline="!isMobile" :label-position="isMobile ? 'top' : 'right'" class="filter-form">
         <el-form-item label="传感器">
-          <el-select v-model="filterForm.sensor_id" placeholder="选择传感器" clearable style="width: 200px">
+          <el-select v-model="filterForm.sensor_id" placeholder="选择传感器" clearable class="sensor-select">
             <el-option-group label="超声波传感器">
               <el-option 
                 v-for="s in ultrasonicSensors" 
@@ -31,6 +31,7 @@
         </el-form-item>
         <el-form-item label="时间范围">
           <el-date-picker
+            v-if="!isMobile"
             v-model="filterForm.timeRange"
             type="datetimerange"
             range-separator="至"
@@ -38,27 +39,42 @@
             end-placeholder="结束时间"
             value-format="YYYY-MM-DD HH:mm:ss"
           />
+          <div v-else class="mobile-time-range">
+            <el-date-picker
+              v-model="filterForm.timeRange[0]"
+              type="datetime"
+              placeholder="开始时间"
+              value-format="YYYY-MM-DD HH:mm:ss"
+            />
+            <el-date-picker
+              v-model="filterForm.timeRange[1]"
+              type="datetime"
+              placeholder="结束时间"
+              value-format="YYYY-MM-DD HH:mm:ss"
+            />
+          </div>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="queryHistory">
             <el-icon><Search /></el-icon>查询
           </el-button>
           <el-button @click="resetFilter">重置</el-button>
-          <el-button type="success" @click="exportData" :disabled="!historyData.length">
+          <el-button type="success" :loading="exporting" @click="exportData" :disabled="historyTotal === 0">
             <el-icon><Download /></el-icon>导出
           </el-button>
         </el-form-item>
       </el-form>
 
       <!-- Chart -->
-      <div v-if="historyData.length" class="chart-section">
+      <div v-if="chartData.length" class="chart-section">
         <v-chart class="history-chart" :option="chartOption" autoresize @datazoom="handleDataZoom" />
       </div>
 
       <!-- Data Table -->
       <el-table
+        v-if="!isMobile"
         v-loading="loading"
-        :data="paginatedData"
+        :data="historyData"
         stripe
         style="width: 100%"
         max-height="500"
@@ -88,16 +104,42 @@
           <template #default="{ row }">{{ row.external_powered ? '外接供电' : (row.battery_level?.toFixed(1) || '-') }}</template>
         </el-table-column>
       </el-table>
+      <div v-else v-loading="loading" class="history-card-list">
+        <article v-for="record in historyData" :key="record.id" class="history-record-card">
+          <div class="history-record-head">
+            <div>
+              <strong>{{ formatTime(record.recorded_at) }}</strong>
+              <div>{{ record.sensor_id }} · {{ record.location || '未设置位置' }}</div>
+            </div>
+            <el-tag :type="getStatusType(record.status)">{{ getStatusText(record.status) }}</el-tag>
+          </div>
+          <div class="history-record-fields">
+            <div>
+              <span>读数</span>
+              <strong v-if="record.water_level !== null && record.water_level !== undefined">{{ record.water_level.toFixed(2) }} cm</strong>
+              <strong v-else-if="record.water_detected !== null">{{ record.water_detected ? '浸水' : '正常' }}</strong>
+              <strong v-else>-</strong>
+            </div>
+            <div>
+              <span>供电</span>
+              <strong>{{ record.external_powered ? '外接供电' : (record.battery_level !== null && record.battery_level !== undefined ? `${record.battery_level.toFixed(1)}%` : '-') }}</strong>
+            </div>
+          </div>
+        </article>
+      </div>
 
       <!-- Pagination -->
       <el-pagination
-        v-if="historyData.length"
+        v-if="historyTotal > 0"
         v-model:current-page="currentPage"
         v-model:page-size="pageSize"
-        :page-sizes="[50, 100, 200, 500]"
-        layout="total, sizes, prev, pager, next"
-        :total="historyData.length"
+        :page-sizes="[20, 50, 100, 200]"
+        :layout="isMobile ? 'total, prev, next' : 'total, sizes, prev, pager, next'"
+        :pager-count="isMobile ? 5 : 7"
+        :total="historyTotal"
         class="pagination"
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
       />
 
       <el-empty v-if="!loading && !historyData.length" description="请选择条件查询数据" />
@@ -116,10 +158,12 @@ import VChart from 'vue-echarts'
 import { useSensorStore } from '../stores/sensors'
 import dayjs from 'dayjs'
 import { formatUtc8AsBackendUtc, formatUtc8DateTime } from '../utils/time'
+import { useResponsive } from '../composables/useResponsive'
 
 use([CanvasRenderer, LineChart, ScatterChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent])
 
 const sensorStore = useSensorStore()
+const { isMobile } = useResponsive()
 
 const filterForm = ref({
   sensor_id: '',
@@ -127,7 +171,10 @@ const filterForm = ref({
 })
 
 const historyData = ref([])
+const chartData = ref([])
+const historyTotal = ref(0)
 const loading = ref(false)
+const exporting = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(100)
 const chartZoomRange = ref(null)
@@ -137,23 +184,18 @@ let refreshTimer = null
 const ultrasonicSensors = computed(() => sensorStore.ultrasonicSensors)
 const immersionSensors = computed(() => sensorStore.immersionSensors)
 
-const paginatedData = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return historyData.value.slice(start, start + pageSize.value)
-})
-
 const getCurrentQueryKey = () => {
   const timeRange = filterForm.value.timeRange || []
   return [filterForm.value.sensor_id, timeRange[0] || '', timeRange[1] || ''].join('|')
 }
 
 const chartOption = computed(() => {
-  if (!historyData.value.length) return {}
+  if (!chartData.value.length) return {}
   
   const sensor = sensorStore.sensors.find(s => s.sensor_id === filterForm.value.sensor_id)
   const isUltrasonic = sensor?.sensor_type === 'ultrasonic'
   
-  const data = historyData.value
+  const data = chartData.value
     .filter(d => isUltrasonic ? d.water_level !== null : d.water_detected !== null)
     .map(d => [formatUtc8DateTime(d.recorded_at), isUltrasonic ? d.water_level : (d.water_detected ? 1 : 0)])
     .reverse()
@@ -161,7 +203,7 @@ const chartOption = computed(() => {
   return {
     title: { text: `${sensor?.sensor_id} - ${sensor?.location}`, left: 'center' },
     tooltip: { trigger: 'axis' },
-    grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+    grid: { left: '3%', right: '4%', bottom: isMobile.value ? '8%' : '15%', containLabel: true },
     xAxis: { type: 'time', boundaryGap: false },
     yAxis: { 
       type: 'value', 
@@ -169,10 +211,12 @@ const chartOption = computed(() => {
       min: isUltrasonic ? 0 : -0.1,
       max: isUltrasonic ? null : 1.1
     },
-    dataZoom: [
-      { id: 'history-inside-zoom', type: 'inside', ...(chartZoomRange.value || {}) },
-      { id: 'history-slider-zoom', type: 'slider', ...(chartZoomRange.value || {}) }
-    ],
+    dataZoom: isMobile.value
+      ? [{ id: 'history-inside-zoom', type: 'inside', ...(chartZoomRange.value || {}) }]
+      : [
+          { id: 'history-inside-zoom', type: 'inside', ...(chartZoomRange.value || {}) },
+          { id: 'history-slider-zoom', type: 'slider', ...(chartZoomRange.value || {}) }
+        ],
     series: [{
       name: isUltrasonic ? '水位' : '浸水',
       type: isUltrasonic ? 'line' : 'scatter',
@@ -208,7 +252,19 @@ const handleDataZoom = (params) => {
   }
 }
 
-const queryHistory = async ({ resetPage = true } = {}) => {
+const buildQueryParams = () => {
+  const params = {}
+  const [startTime, endTime] = filterForm.value.timeRange || []
+  if (startTime) {
+    params.start_time = formatUtc8AsBackendUtc(startTime)
+  }
+  if (endTime) {
+    params.end_time = formatUtc8AsBackendUtc(endTime)
+  }
+  return params
+}
+
+const queryHistory = async ({ resetPage = true, refreshChart = true } = {}) => {
   if (!filterForm.value.sensor_id) {
     ElMessage.warning('请选择传感器')
     return
@@ -218,23 +274,32 @@ const queryHistory = async ({ resetPage = true } = {}) => {
   try {
     const queryKey = getCurrentQueryKey()
     const queryChanged = queryKey !== activeQueryKey.value
-    const params = { limit: 10000 }
-    if (filterForm.value.timeRange?.length === 2) {
-      params.start_time = formatUtc8AsBackendUtc(filterForm.value.timeRange[0])
-      params.end_time = formatUtc8AsBackendUtc(filterForm.value.timeRange[1])
+    if (resetPage || queryChanged) {
+      currentPage.value = 1
     }
-    
-    const response = await sensorStore.fetchReadings(filterForm.value.sensor_id, params)
+
+    const baseParams = buildQueryParams()
+    const tableRequest = sensorStore.fetchReadings(filterForm.value.sensor_id, {
+      ...baseParams,
+      limit: pageSize.value,
+      page: currentPage.value,
+    })
+    const chartRequest = refreshChart || queryChanged
+      ? sensorStore.fetchReadings(filterForm.value.sensor_id, { ...baseParams, limit: 2000, page: 1 })
+      : null
+    const [response, chartResponse] = await Promise.all([tableRequest, chartRequest])
+
     historyData.value = response.items.map(item => ({
       ...item,
       location: sensorStore.sensors.find(s => s.sensor_id === item.sensor_id)?.location || ''
     }))
+    historyTotal.value = response.total
+    if (chartResponse) {
+      chartData.value = chartResponse.items
+    }
     activeQueryKey.value = queryKey
     if (queryChanged) {
       chartZoomRange.value = null
-    }
-    if (resetPage || queryChanged) {
-      currentPage.value = 1
     }
   } catch (error) {
     ElMessage.error('查询失败')
@@ -246,33 +311,67 @@ const queryHistory = async ({ resetPage = true } = {}) => {
 const resetFilter = () => {
   filterForm.value = { sensor_id: '', timeRange: [] }
   historyData.value = []
+  chartData.value = []
+  historyTotal.value = 0
   chartZoomRange.value = null
   activeQueryKey.value = ''
   currentPage.value = 1
 }
 
-const exportData = () => {
-  const sensor = sensorStore.sensors.find(s => s.sensor_id === filterForm.value.sensor_id)
-  const csvContent = [
-    ['时间', '传感器ID', '位置', '状态', '水位(cm)', '浸水', '供电/电量', '信号(dBm)'].join(','),
-    ...historyData.value.map(row => [
-      formatTime(row.recorded_at),
-      row.sensor_id,
-      sensor?.location || '',
-      row.status,
-      row.water_level ?? '',
-      row.water_detected ?? '',
-      row.external_powered ? '外接供电' : (row.battery_level ?? ''),
-      row.signal_strength ?? ''
-    ].join(','))
-  ].join('\n')
-  
-  const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = `sensor_data_${filterForm.value.sensor_id}_${dayjs().format('YYYYMMDD')}.csv`
-  link.click()
-  ElMessage.success('导出成功')
+const exportData = async () => {
+  if (!filterForm.value.sensor_id || historyTotal.value === 0) {
+    return
+  }
+
+  if (historyTotal.value > 10000) {
+    ElMessage.warning('单次最多导出最近 10000 条记录，请缩小时间范围后重试')
+    return
+  }
+
+  exporting.value = true
+  try {
+    const response = await sensorStore.fetchReadings(filterForm.value.sensor_id, {
+      ...buildQueryParams(),
+      limit: Math.max(historyTotal.value, 1),
+      page: 1,
+    })
+    const sensor = sensorStore.sensors.find(s => s.sensor_id === filterForm.value.sensor_id)
+    const csvContent = [
+      ['时间', '传感器ID', '位置', '状态', '水位(cm)', '浸水', '供电/电量', '信号(dBm)'].join(','),
+      ...response.items.map(row => [
+        formatTime(row.recorded_at),
+        row.sensor_id,
+        sensor?.location || '',
+        row.status,
+        row.water_level ?? '',
+        row.water_detected ?? '',
+        row.external_powered ? '外接供电' : (row.battery_level ?? ''),
+        row.signal_strength ?? ''
+      ].join(','))
+    ].join('\n')
+
+    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' })
+    const downloadUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.download = `sensor_data_${filterForm.value.sensor_id}_${dayjs().format('YYYYMMDD')}.csv`
+    link.click()
+    URL.revokeObjectURL(downloadUrl)
+    ElMessage.success('导出成功')
+  } catch {
+    ElMessage.error('导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+const handlePageChange = () => {
+  queryHistory({ resetPage: false, refreshChart: false })
+}
+
+const handlePageSizeChange = () => {
+  currentPage.value = 1
+  queryHistory({ resetPage: false, refreshChart: false })
 }
 
 onMounted(() => {
@@ -280,7 +379,7 @@ onMounted(() => {
   refreshTimer = setInterval(() => {
     sensorStore.fetchSensors()
     if (filterForm.value.sensor_id) {
-      queryHistory({ resetPage: false })
+      queryHistory({ resetPage: false, refreshChart: true })
     }
   }, 10000)
 })
@@ -306,6 +405,16 @@ onUnmounted(() => {
   margin-bottom: 20px;
 }
 
+.sensor-select {
+  width: 220px;
+}
+
+.mobile-time-range {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
 .chart-section {
   height: 400px;
   margin-bottom: 20px;
@@ -319,5 +428,105 @@ onUnmounted(() => {
 .pagination {
   margin-top: 20px;
   justify-content: flex-end;
+}
+
+.history-card-list {
+  min-height: 120px;
+  display: grid;
+  gap: 12px;
+}
+
+.history-record-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.history-record-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-record-head strong {
+  color: #303133;
+  font-size: 14px;
+}
+
+.history-record-head div div {
+  margin-top: 5px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.history-record-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.history-record-fields > div {
+  display: grid;
+  gap: 5px;
+}
+
+.history-record-fields span {
+  color: #909399;
+  font-size: 12px;
+}
+
+.history-record-fields strong {
+  color: #606266;
+  font-size: 14px;
+}
+
+@media (max-width: 767px) {
+  .filter-form {
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+
+  .filter-form :deep(.el-form-item) {
+    width: 100%;
+    margin-right: 0;
+    margin-bottom: 14px;
+  }
+
+  .filter-form :deep(.el-form-item:last-child) {
+    margin-bottom: 0;
+  }
+
+  .sensor-select,
+  .filter-form :deep(.el-date-editor) {
+    width: 100% !important;
+  }
+
+  .filter-form :deep(.el-form-item__content) {
+    width: 100%;
+  }
+
+  .filter-form :deep(.el-form-item:last-child .el-form-item__content) {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .filter-form :deep(.el-button) {
+    min-height: 42px;
+    margin-left: 0;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .chart-section {
+    height: 280px;
+  }
+
+  .pagination {
+    justify-content: space-between;
+  }
 }
 </style>

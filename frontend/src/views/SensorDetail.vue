@@ -97,7 +97,7 @@
           <template #header>
             <span>最近读数记录</span>
           </template>
-          <el-table :data="readings" stripe>
+          <el-table v-if="!isMobile" :data="readings" stripe>
             <el-table-column prop="recorded_at" label="时间" width="180">
               <template #default="{ row }">{{ formatTime(row.recorded_at) }}</template>
             </el-table-column>
@@ -117,6 +117,30 @@
             </el-table-column>
             <el-table-column prop="signal_strength" label="信号(dBm)" width="120" />
           </el-table>
+          <div v-else class="reading-card-list">
+            <article v-for="reading in readings" :key="reading.id" class="reading-card">
+              <div class="reading-card-head">
+                <strong>{{ formatTime(reading.recorded_at) }}</strong>
+                <el-tag :type="getStatusType(reading.status)">{{ getStatusText(reading.status) }}</el-tag>
+              </div>
+              <div class="reading-card-grid">
+                <div>
+                  <span>读数</span>
+                  <strong v-if="sensor.sensor_type === 'ultrasonic'">{{ reading.water_level?.toFixed(1) ?? '-' }} cm</strong>
+                  <strong v-else>{{ reading.water_detected ? '浸水' : '正常' }}</strong>
+                </div>
+                <div>
+                  <span>供电</span>
+                  <strong>{{ reading.external_powered ? '外接供电' : (reading.battery_level !== null && reading.battery_level !== undefined ? `${reading.battery_level.toFixed(1)}%` : '-') }}</strong>
+                </div>
+                <div>
+                  <span>信号</span>
+                  <strong>{{ reading.signal_strength !== null && reading.signal_strength !== undefined ? `${reading.signal_strength} dBm` : '-' }}</strong>
+                </div>
+              </div>
+            </article>
+            <el-empty v-if="readings.length === 0" description="暂无读数记录" />
+          </div>
         </el-card>
       </el-col>
     </el-row>
@@ -135,12 +159,14 @@ import VChart from 'vue-echarts'
 import { useAccountStore } from '../stores/account'
 import { useSensorStore } from '../stores/sensors'
 import { formatUtc8DateTime } from '../utils/time'
+import { useResponsive } from '../composables/useResponsive'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent])
 
 const route = useRoute()
 const accountStore = useAccountStore()
 const sensorStore = useSensorStore()
+const { isMobile } = useResponsive()
 const sensorId = computed(() => route.params.id)
 let refreshTimer = null
 
@@ -157,7 +183,7 @@ const chartOption = computed(() => {
   
   return {
     tooltip: { trigger: 'axis' },
-    grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
+    grid: { left: '3%', right: '4%', bottom: isMobile.value ? '10%' : '15%', containLabel: true },
     xAxis: {
       type: 'time',
       boundaryGap: false
@@ -168,7 +194,7 @@ const chartOption = computed(() => {
       min: isUltrasonic ? 0 : -0.1,
       max: isUltrasonic ? null : 1.1
     },
-    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+    dataZoom: isMobile.value ? [{ type: 'inside' }] : [{ type: 'inside' }, { type: 'slider' }],
     series: [{
       name: isUltrasonic ? '水位' : '浸水状态',
       type: 'line',
@@ -347,5 +373,114 @@ onUnmounted(() => {
 .reading-extra .el-icon {
   margin-right: 4px;
   vertical-align: middle;
+}
+
+.reading-card-list {
+  display: grid;
+  gap: 12px;
+}
+
+.reading-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.reading-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reading-card-head strong {
+  color: #303133;
+  font-size: 14px;
+}
+
+.reading-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.reading-card-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.reading-card-grid span {
+  color: #909399;
+  font-size: 12px;
+}
+
+.reading-card-grid strong {
+  overflow: hidden;
+  color: #606266;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  .sensor-detail :deep(.el-page-header__left) {
+    min-height: 44px;
+  }
+
+  .detail-row {
+    margin-top: 12px;
+  }
+
+  .detail-row :deep(.el-col + .el-col) {
+    margin-top: 12px;
+  }
+
+  .chart-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .chart-header :deep(.el-radio-group) {
+    width: 100%;
+    display: flex;
+  }
+
+  .chart-header :deep(.el-radio-button) {
+    flex: 1;
+  }
+
+  .chart-header :deep(.el-radio-button__inner) {
+    width: 100%;
+  }
+
+  .chart-container {
+    height: 280px;
+  }
+
+  .latest-reading {
+    padding: 8px 0;
+  }
+
+  .reading-value {
+    font-size: 38px;
+  }
+
+  .reading-extra {
+    align-items: center;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mt-4 {
+    margin-top: 12px;
+  }
+
+  :deep(.el-descriptions__label) {
+    width: 104px;
+  }
 }
 </style>

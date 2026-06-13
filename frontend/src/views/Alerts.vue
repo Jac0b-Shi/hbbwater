@@ -48,6 +48,7 @@
 
       <!-- Alerts Table -->
       <el-table
+        v-if="!isMobile"
         v-loading="alertStore.loading"
         :data="filteredAlerts"
         stripe
@@ -103,11 +104,44 @@
           </template>
         </el-table-column>
       </el-table>
+      <div v-else v-loading="alertStore.loading" class="alert-card-list">
+        <article v-for="alert in filteredAlerts" :key="alert.id" class="alert-card" :class="`severity-${alert.severity}`">
+          <div class="alert-card-head">
+            <div class="alert-card-tags">
+              <el-tag :type="getSeverityType(alert.severity)">{{ getSeverityText(alert.severity) }}</el-tag>
+              <el-tag effect="plain">{{ getAlertTypeText(alert.alert_type) }}</el-tag>
+            </div>
+            <el-tag size="small" :type="alert.is_resolved ? 'success' : 'danger'">
+              {{ alert.is_resolved ? '已处理' : '未处理' }}
+            </el-tag>
+          </div>
+          <div class="alert-card-message">{{ alert.message }}</div>
+          <dl class="alert-card-meta">
+            <div><dt>传感器</dt><dd>{{ alert.sensor_id }}</dd></div>
+            <div><dt>时间</dt><dd>{{ formatTime(alert.created_at) }}</dd></div>
+            <div v-if="alert.is_resolved"><dt>处理人</dt><dd>{{ alert.resolved_by || '-' }}</dd></div>
+          </dl>
+          <el-collapse v-if="alert.details" class="alert-details-collapse">
+            <el-collapse-item title="查看详细信息" name="details">
+              <pre>{{ JSON.stringify(alert.details, null, 2) }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+          <el-button
+            v-if="!alert.is_resolved && accountStore.canResolveAlerts"
+            type="primary"
+            class="mobile-primary-action"
+            @click="resolveAlert(alert)"
+          >
+            处理告警
+          </el-button>
+        </article>
+        <el-empty v-if="filteredAlerts.length === 0" description="暂无告警" />
+      </div>
     </el-card>
 
     <!-- Resolve Dialog -->
-    <el-dialog v-model="showResolveDialog" title="处理告警" width="400px">
-      <el-form :model="resolveForm">
+    <el-dialog v-model="showResolveDialog" title="处理告警" :width="dialogWidth">
+      <el-form :model="resolveForm" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="处理人">
           <el-input v-model="resolveForm.resolved_by" placeholder="请输入处理人姓名" />
         </el-form-item>
@@ -126,9 +160,12 @@ import { ElMessage } from 'element-plus'
 import { useAccountStore } from '../stores/account'
 import { useAlertStore } from '../stores/alerts'
 import { formatUtc8DateTime } from '../utils/time'
+import { useResponsive } from '../composables/useResponsive'
 
 const accountStore = useAccountStore()
 const alertStore = useAlertStore()
+const { isMobile } = useResponsive()
+const dialogWidth = computed(() => isMobile.value ? 'calc(100vw - 24px)' : '400px')
 
 const filterStatus = ref('active')
 const showResolveDialog = ref(false)
@@ -266,5 +303,146 @@ onUnmounted(() => {
 .resolved-info {
   font-size: 12px;
   color: #909399;
+}
+
+.alert-card-list {
+  min-height: 120px;
+  display: grid;
+  gap: 12px;
+}
+
+.alert-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-left: 4px solid #909399;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.alert-card.severity-critical,
+.alert-card.severity-high {
+  border-left-color: #f56c6c;
+}
+
+.alert-card.severity-medium {
+  border-left-color: #e6a23c;
+}
+
+.alert-card-head,
+.alert-card-tags {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.alert-card-head {
+  justify-content: space-between;
+}
+
+.alert-card-tags {
+  flex-wrap: wrap;
+}
+
+.alert-card-message {
+  margin: 14px 0;
+  color: #303133;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.alert-card-meta {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.alert-card-meta div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.alert-card-meta dt,
+.alert-card-meta dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.alert-card-meta dt {
+  color: #909399;
+}
+
+.alert-card-meta dd {
+  color: #606266;
+  overflow-wrap: anywhere;
+}
+
+.alert-details-collapse {
+  margin-top: 10px;
+}
+
+.alert-details-collapse :deep(.el-collapse-item__content) {
+  padding-bottom: 8px;
+}
+
+.alert-details-collapse pre {
+  margin: 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #f5f7fa;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mobile-primary-action {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 12px;
+}
+
+@media (max-width: 767px) {
+  .page-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .header-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .header-actions :deep(.el-radio-group) {
+    display: flex;
+  }
+
+  .header-actions :deep(.el-radio-button) {
+    flex: 1;
+  }
+
+  .header-actions :deep(.el-radio-button__inner) {
+    width: 100%;
+  }
+
+  .stats-row {
+    margin-bottom: 8px;
+  }
+
+  .stats-row :deep(.el-col) {
+    margin-bottom: 12px;
+  }
+
+  .stat-box {
+    padding: 14px 8px;
+  }
+
+  .stat-number {
+    font-size: 26px;
+  }
+
+  :global(.el-dialog) {
+    max-width: calc(100vw - 24px);
+  }
 }
 </style>

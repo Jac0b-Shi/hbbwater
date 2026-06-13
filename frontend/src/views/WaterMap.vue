@@ -81,7 +81,7 @@
               <span class="zoom-value">{{ zoomPercent }}%</span>
               <el-button size="small" @click="resetZoom">适配</el-button>
             </div>
-            <el-select v-model="statusFilter" size="small" style="width: 160px">
+            <el-select v-model="statusFilter" size="small" class="status-filter">
               <el-option
                 v-for="option in statusFilterOptions"
                 :key="option.value"
@@ -89,6 +89,14 @@
                 :value="option.value"
               />
             </el-select>
+            <el-button
+              v-if="accountStore.canManageSensors"
+              :type="layoutEditMode ? 'warning' : 'default'"
+              size="small"
+              @click="layoutEditMode = !layoutEditMode"
+            >
+              {{ layoutEditMode ? '退出布局编辑' : '编辑点位布局' }}
+            </el-button>
             <el-button :loading="statusLoading" size="small" @click="refreshAll">
               <el-icon><Refresh /></el-icon>刷新数据
             </el-button>
@@ -159,7 +167,7 @@
                 </button>
 
                 <button
-                  v-if="accountStore.canManageSensors && !isMarkerLocked(marker)"
+                  v-if="accountStore.canManageSensors && layoutEditMode && !isMarkerLocked(marker)"
                   class="drag-handle"
                   type="button"
                   @pointerdown.prevent.stop="startDrag($event, marker)"
@@ -347,6 +355,7 @@ const pendingPositions = ref({})
 const dragState = ref(null)
 const mapStageRef = ref(null)
 const mapZoom = ref(1)
+const layoutEditMode = ref(false)
 const panelForm = reactive({
   water_level_baseline: null,
   map_locked: false,
@@ -673,7 +682,7 @@ function clearPendingPosition(sensorId) {
 }
 
 function startDrag(event, marker) {
-  if (!accountStore.canManageSensors || isMarkerLocked(marker) || !mapStageRef.value) {
+  if (!accountStore.canManageSensors || !layoutEditMode.value || isMarkerLocked(marker) || !mapStageRef.value) {
     return
   }
 
@@ -945,6 +954,10 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.status-filter {
+  width: 160px;
 }
 
 .rainfall-strip {
@@ -1430,8 +1443,38 @@ onUnmounted(() => {
     padding: 10px;
   }
 
+  .map-card-header {
+    gap: 14px;
+  }
+
+  .map-subtitle {
+    line-height: 1.5;
+  }
+
+  .map-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .map-toolbar :deep(.el-button),
+  .status-filter {
+    width: 100%;
+    min-height: 42px;
+    margin-left: 0;
+  }
+
+  .map-toolbar .zoom-controls {
+    grid-column: 1 / -1;
+  }
+
   .map-viewport {
     padding-bottom: 16px;
+    overscroll-behavior: contain;
+  }
+
+  .map-canvas {
+    min-width: 720px;
   }
 
   .zoom-controls {
