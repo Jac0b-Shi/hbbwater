@@ -6,7 +6,7 @@
           <template #header>
             <span>系统配置</span>
           </template>
-          <el-form :model="systemConfig" label-width="150px">
+          <el-form :model="systemConfig" :label-width="isMobile ? 'auto' : '150px'" :label-position="isMobile ? 'top' : 'right'">
             <el-form-item label="热数据保留天数">
               <el-input-number v-model="systemConfig.data_retention_days" :min="7" :max="30" />
               <span class="form-hint">天</span>
@@ -37,7 +37,7 @@
           <template #header>
             <span>通知设置</span>
           </template>
-          <el-form :model="notifyConfig" label-width="150px">
+          <el-form :model="notifyConfig" :label-width="isMobile ? 'auto' : '150px'" :label-position="isMobile ? 'top' : 'right'">
             <el-form-item label="邮件通知">
               <el-switch v-model="notifyConfig.email_enabled" />
               <span class="form-hint" style="margin-left: 10px; color: #67c23a;">优先使用 SMTP，失败时回退 WordPress 网关</span>
@@ -181,7 +181,7 @@
             <el-descriptions-item label="连接方式">{{ runtimeConnectionText }}</el-descriptions-item>
           </el-descriptions>
 
-          <el-form :model="businessProfileForm" label-width="150px">
+          <el-form :model="businessProfileForm" :label-width="isMobile ? 'auto' : '150px'" :label-position="isMobile ? 'top' : 'right'">
             <el-form-item label="配置名称">
               <el-input v-model="businessProfileForm.display_name" placeholder="例如：本地 MySQL / 单位达梦集群" />
             </el-form-item>
@@ -330,6 +330,9 @@ import { ElMessage } from 'element-plus'
 import axios from 'axios'
 import { APP_VERSION } from '../constants/appMeta'
 import { formatUtc8DateTime } from '../utils/time'
+import { useResponsive } from '../composables/useResponsive'
+
+const { isMobile } = useResponsive()
 
 const systemConfig = ref({
   data_retention_days: 14,
@@ -870,6 +873,31 @@ onMounted(async () => {
 
   .db-actions {
     flex-direction: column;
+  }
+
+  .settings-page :deep(.el-col + .el-col) {
+    margin-top: 12px;
+  }
+
+  .settings-page :deep(.el-form-item__label) {
+    margin-bottom: 4px;
+  }
+
+  .settings-page :deep(.el-input-number),
+  .settings-page :deep(.el-select) {
+    width: 100%;
+  }
+
+  .settings-page :deep(.el-form-item .el-button),
+  .profile-toolbar :deep(.el-button),
+  .db-actions :deep(.el-button) {
+    min-height: 42px;
+    margin-left: 0;
+  }
+
+  .profile-toolbar :deep(.el-button),
+  .db-actions :deep(.el-button) {
+    width: 100%;
   }
 }
 </style>

@@ -2,7 +2,7 @@
   <div class="dashboard">
     <!-- Stats Cards -->
     <el-row :gutter="20" class="stats-row">
-      <el-col :xs="24" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-icon total">
             <el-icon><Cpu /></el-icon>
@@ -14,7 +14,7 @@
         </el-card>
       </el-col>
       
-      <el-col :xs="24" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-icon online">
             <el-icon><CircleCheck /></el-icon>
@@ -27,7 +27,7 @@
         </el-card>
       </el-col>
       
-      <el-col :xs="24" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-icon alert">
             <el-icon><Warning /></el-icon>
@@ -39,7 +39,7 @@
         </el-card>
       </el-col>
       
-      <el-col :xs="24" :sm="12" :md="6">
+      <el-col :xs="12" :sm="12" :md="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-icon data">
             <el-icon><DataLine /></el-icon>
@@ -128,7 +128,7 @@
               </el-button>
             </div>
           </template>
-          <el-table :data="dashboardStore.sensorStatus" stripe style="width: 100%">
+          <el-table v-if="!isMobile" :data="dashboardStore.sensorStatus" stripe style="width: 100%">
             <el-table-column prop="sensor_id" label="传感器ID" width="150" />
             <el-table-column prop="location" label="位置" />
             <el-table-column prop="sensor_type" label="类型" width="120">
@@ -172,6 +172,42 @@
               </template>
             </el-table-column>
           </el-table>
+          <div v-else class="mobile-record-list">
+            <article
+              v-for="sensor in dashboardStore.sensorStatus"
+              :key="sensor.sensor_id"
+              class="sensor-status-card"
+            >
+              <div class="mobile-record-head">
+                <div>
+                  <strong>{{ sensor.sensor_id }}</strong>
+                  <div class="mobile-record-subtitle">{{ sensor.location || '未设置位置' }}</div>
+                </div>
+                <el-tag :type="getStatusType(sensor.status)">{{ getStatusText(sensor.status) }}</el-tag>
+              </div>
+              <div class="sensor-status-grid">
+                <div>
+                  <span>类型</span>
+                  <strong>{{ sensor.sensor_type === 'ultrasonic' ? '超声波' : '浸水' }}</strong>
+                </div>
+                <div>
+                  <span>连接</span>
+                  <strong :class="sensor.is_online ? 'is-online' : 'is-offline'">
+                    {{ sensor.is_online ? '在线' : '离线' }}
+                  </strong>
+                </div>
+                <div>
+                  <span>当前读数</span>
+                  <strong>{{ sensor.water_level !== null ? `${sensor.water_level.toFixed(1)} cm` : (sensor.water_detected ? '浸水' : '-') }}</strong>
+                </div>
+                <div>
+                  <span>供电</span>
+                  <strong>{{ sensor.external_powered ? '外接供电' : (sensor.battery_level !== null ? `${Math.round(sensor.battery_level)}%` : '-') }}</strong>
+                </div>
+              </div>
+            </article>
+            <el-empty v-if="dashboardStore.sensorStatus.length === 0" description="暂无传感器状态" />
+          </div>
         </el-card>
       </el-col>
 
@@ -258,9 +294,11 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../stores/dashboard'
 import { useWeatherStore } from '../stores/weather'
 import { formatUtc8DateTime, SHORT_DATE_TIME_FORMAT } from '../utils/time'
+import { useResponsive } from '../composables/useResponsive'
 
 const dashboardStore = useDashboardStore()
 const weatherStore = useWeatherStore()
+const { isMobile } = useResponsive()
 const dataFilter = ref('all')
 let refreshInterval = null
 let weatherRefreshInterval = null
@@ -502,9 +540,13 @@ onUnmounted(() => {
 }
 
 .stat-card {
+  padding: 10px;
+}
+
+.stat-card :deep(.el-card__body) {
+  width: 100%;
   display: flex;
   align-items: center;
-  padding: 10px;
 }
 
 .stat-icon {
@@ -657,6 +699,160 @@ onUnmounted(() => {
 
   .rainfall-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.mobile-record-list {
+  display: grid;
+  gap: 12px;
+}
+
+.sensor-status-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.mobile-record-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobile-record-subtitle {
+  margin-top: 5px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.sensor-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.sensor-status-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.sensor-status-grid span {
+  color: #909399;
+  font-size: 12px;
+}
+
+.sensor-status-grid strong {
+  overflow: hidden;
+  color: #303133;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sensor-status-grid .is-online {
+  color: #67c23a;
+}
+
+.sensor-status-grid .is-offline {
+  color: #f56c6c;
+}
+
+@media (max-width: 767px) {
+  .dashboard {
+    padding-bottom: 4px;
+  }
+
+  .stats-row,
+  .rainfall-row,
+  .main-row {
+    margin-bottom: 12px;
+  }
+
+  .stats-row :deep(.el-col) {
+    margin-bottom: 12px;
+  }
+
+  .stat-card {
+    min-height: 96px;
+    padding: 2px;
+  }
+
+  .stat-card :deep(.el-card__body) {
+    padding: 12px;
+  }
+
+  .stat-icon {
+    width: 42px;
+    height: 42px;
+    margin-right: 10px;
+    border-radius: 10px;
+    font-size: 23px;
+  }
+
+  .stat-value {
+    font-size: 23px;
+  }
+
+  .stat-label {
+    margin-top: 5px;
+    font-size: 12px;
+  }
+
+  .rainfall-station {
+    padding: 12px;
+  }
+
+  .rainfall-card :deep(.el-empty) {
+    padding: 12px 0;
+  }
+
+  .rainfall-card :deep(.el-empty__image) {
+    width: 76px;
+  }
+
+  .rainfall-station-head,
+  .rainfall-station-foot,
+  .card-header {
+    align-items: flex-start;
+  }
+
+  .rainfall-station-foot {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .status-card {
+    min-height: auto;
+  }
+
+  .alert-list {
+    max-height: none;
+  }
+
+  .reading-item {
+    gap: 8px;
+  }
+
+  .bottom-row .card-header {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .bottom-row :deep(.el-radio-group) {
+    width: 100%;
+    display: flex;
+  }
+
+  .bottom-row :deep(.el-radio-button) {
+    flex: 1;
+  }
+
+  .bottom-row :deep(.el-radio-button__inner) {
+    width: 100%;
   }
 }
 </style>

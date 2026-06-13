@@ -57,7 +57,7 @@
 
           <div v-show="expandedGroups.has(group.id)" class="group-sensors">
             <el-empty v-if="!group.sensors.length" description="组内还没有传感器" />
-            <el-table v-else :data="group.sensors" stripe>
+            <el-table v-else-if="!isMobile" :data="group.sensors" stripe>
               <el-table-column prop="sensor_id" label="传感器ID" width="150" />
               <el-table-column prop="sensor_type" label="类型" width="120">
                 <template #default="{ row }">
@@ -81,13 +81,38 @@
                 </template>
               </el-table-column>
             </el-table>
+            <div v-else class="sensor-card-list">
+              <article v-for="sensor in group.sensors" :key="sensor.sensor_id" class="sensor-card">
+                <div class="sensor-card-head">
+                  <div>
+                    <strong>{{ sensor.sensor_id }}</strong>
+                    <div>{{ sensor.location || '未设置位置' }}</div>
+                  </div>
+                  <el-tag :type="sensor.sensor_type === 'ultrasonic' ? 'primary' : 'warning'">
+                    {{ sensor.sensor_type === 'ultrasonic' ? '超声波' : '浸水' }}
+                  </el-tag>
+                </div>
+                <div class="sensor-card-fields">
+                  <div><span>设备 IMEI</span><strong>{{ sensor.device_imei || '-' }}</strong></div>
+                  <div>
+                    <span>启用状态</span>
+                    <el-switch v-model="sensor.is_active" :disabled="!accountStore.canManageSensors" @change="(val) => toggleActive(sensor, val)" />
+                  </div>
+                </div>
+                <div class="sensor-card-actions">
+                  <el-button type="primary" plain @click="viewDetail(sensor)">详情</el-button>
+                  <el-button v-if="accountStore.canManageSensors" @click="openSensorDialog(group, sensor)">编辑</el-button>
+                  <el-button v-if="accountStore.canManageSensors" type="danger" plain @click="deleteSensor(sensor)">删除</el-button>
+                </div>
+              </article>
+            </div>
           </div>
         </el-card>
       </div>
       <el-empty v-else description="还没有组，可先创建组Webhook" />
 
       <div class="section-title standalone-title">未分组传感器</div>
-      <el-table v-loading="sensorStore.loading" :data="filteredStandaloneSensors" stripe>
+      <el-table v-if="!isMobile" v-loading="sensorStore.loading" :data="filteredStandaloneSensors" stripe>
         <el-table-column prop="sensor_id" label="传感器ID" width="150" sortable />
         <el-table-column prop="sensor_type" label="类型" width="120" sortable>
           <template #default="{ row }">
@@ -114,10 +139,37 @@
           </template>
         </el-table-column>
       </el-table>
+      <div v-else v-loading="sensorStore.loading" class="sensor-card-list standalone-sensor-list">
+        <article v-for="sensor in filteredStandaloneSensors" :key="sensor.sensor_id" class="sensor-card">
+          <div class="sensor-card-head">
+            <div>
+              <strong>{{ sensor.sensor_id }}</strong>
+              <div>{{ sensor.location || '未设置位置' }}</div>
+            </div>
+            <el-tag :type="sensor.sensor_type === 'ultrasonic' ? 'primary' : 'warning'">
+              {{ sensor.sensor_type === 'ultrasonic' ? '超声波' : '浸水' }}
+            </el-tag>
+          </div>
+          <p v-if="sensor.description" class="sensor-card-description">{{ sensor.description }}</p>
+          <div class="sensor-card-fields">
+            <div><span>上报方式</span><strong>{{ formatReportMethod(sensor.report_method) }}</strong></div>
+            <div>
+              <span>启用状态</span>
+              <el-switch v-model="sensor.is_active" :disabled="!accountStore.canManageSensors" @change="(val) => toggleActive(sensor, val)" />
+            </div>
+          </div>
+          <div class="sensor-card-actions">
+            <el-button type="primary" plain @click="viewDetail(sensor)">详情</el-button>
+            <el-button v-if="accountStore.canManageSensors" @click="openSensorDialog(null, sensor)">编辑</el-button>
+            <el-button v-if="accountStore.canManageSensors" type="danger" plain @click="deleteSensor(sensor)">删除</el-button>
+          </div>
+        </article>
+        <el-empty v-if="filteredStandaloneSensors.length === 0" description="暂无未分组传感器" />
+      </div>
     </el-card>
 
-    <el-dialog v-model="showGroupDialog" :title="editingGroup ? '编辑组' : '添加组'" width="560px">
-      <el-form ref="groupFormRef" :model="groupForm" :rules="groupRules" label-width="100px">
+    <el-dialog v-model="showGroupDialog" :title="editingGroup ? '编辑组' : '添加组'" :width="groupDialogWidth">
+      <el-form ref="groupFormRef" :model="groupForm" :rules="groupRules" :label-width="isMobile ? 'auto' : '100px'" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="组名称" prop="name">
           <el-input v-model="groupForm.name" placeholder="如: 地下车库一层" />
         </el-form-item>
@@ -145,8 +197,8 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showSensorDialog" :title="editingSensor ? '编辑传感器' : (selectedGroup ? '添加组内传感器' : '添加传感器')" width="620px">
-      <el-form ref="sensorFormRef" :model="sensorForm" :rules="sensorRules" label-width="120px">
+    <el-dialog v-model="showSensorDialog" :title="editingSensor ? '编辑传感器' : (selectedGroup ? '添加组内传感器' : '添加传感器')" :width="sensorDialogWidth">
+      <el-form ref="sensorFormRef" :model="sensorForm" :rules="sensorRules" :label-width="isMobile ? 'auto' : '120px'" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="所属组" v-if="selectedGroup">
           <el-tag type="warning">{{ selectedGroup.name }}</el-tag>
         </el-form-item>
@@ -237,11 +289,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowRight, CopyDocument, Plus } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import { useSensorStore } from '../stores/sensors'
+import { useResponsive } from '../composables/useResponsive'
 
 const route = useRoute()
 const router = useRouter()
 const accountStore = useAccountStore()
 const sensorStore = useSensorStore()
+const { isMobile } = useResponsive()
 
 const searchQuery = ref('')
 const showGroupDialog = ref(false)
@@ -300,6 +354,8 @@ const sensorRules = {
 }
 
 const filter = computed(() => route.meta.filter)
+const groupDialogWidth = computed(() => isMobile.value ? 'calc(100vw - 24px)' : '560px')
+const sensorDialogWidth = computed(() => isMobile.value ? 'calc(100vw - 24px)' : '620px')
 const thresholdConditionOptions = [
   { value: 'greater_or_equal', label: '大于等于阈值触发' },
   { value: 'less_or_equal', label: '小于等于阈值触发' },
@@ -732,5 +788,172 @@ onUnmounted(() => {
 
 .group-sensors {
   margin-top: 12px;
+}
+
+.sensor-card-list {
+  display: grid;
+  gap: 12px;
+}
+
+.sensor-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.sensor-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sensor-card-head strong {
+  color: #303133;
+  font-size: 15px;
+}
+
+.sensor-card-head div div,
+.sensor-card-description {
+  margin-top: 5px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.sensor-card-description {
+  line-height: 1.5;
+}
+
+.sensor-card-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.sensor-card-fields > div {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+
+.sensor-card-fields span {
+  color: #909399;
+  font-size: 12px;
+}
+
+.sensor-card-fields strong {
+  overflow: hidden;
+  color: #606266;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sensor-card-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.sensor-card-actions :deep(.el-button) {
+  min-height: 42px;
+  margin-left: 0;
+}
+
+@media (max-width: 767px) {
+  .page-header,
+  .header-actions,
+  .group-header,
+  .group-actions,
+  .webhook-box {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .page-header {
+    gap: 14px;
+  }
+
+  .header-actions :deep(.el-input),
+  .header-actions :deep(.el-button),
+  .group-actions :deep(.el-button) {
+    width: 100% !important;
+    min-height: 42px;
+    margin-left: 0;
+  }
+
+  .group-header {
+    gap: 12px;
+  }
+
+  .group-main {
+    min-width: 0;
+  }
+
+  .group-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .group-webhook-row :deep(.el-input__wrapper) {
+    min-height: 42px;
+  }
+
+  .webhook-box :deep(.el-button) {
+    min-height: 42px;
+    margin-left: 0;
+  }
+
+  .standalone-title {
+    margin-top: 20px;
+  }
+
+  .sensor-card-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  :deep(.el-dialog__body) {
+    max-height: calc(100dvh - 160px);
+    padding: 14px 16px;
+    overflow-y: auto;
+  }
+
+  :deep(.el-dialog__footer) {
+    padding: 12px 16px 16px;
+  }
+
+  :deep(.el-dialog__footer .el-button) {
+    min-width: 96px;
+    min-height: 42px;
+  }
+
+  :deep(.el-form-item__label) {
+    margin-bottom: 4px;
+  }
+
+  :deep(.el-radio-group) {
+    width: 100%;
+    display: flex;
+  }
+
+  :deep(.el-radio-button) {
+    flex: 1;
+  }
+
+  :deep(.el-radio-button__inner) {
+    width: 100%;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  :deep(.el-input-number),
+  :deep(.el-select) {
+    width: 100% !important;
+  }
 }
 </style>

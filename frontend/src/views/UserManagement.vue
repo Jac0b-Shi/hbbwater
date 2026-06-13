@@ -13,7 +13,7 @@
         </div>
       </template>
 
-      <el-table v-loading="accountStore.loading" :data="accountStore.users" stripe>
+      <el-table v-if="!isMobile" v-loading="accountStore.loading" :data="accountStore.users" stripe>
         <el-table-column prop="display_name" label="显示名称" min-width="180" />
         <el-table-column prop="username" label="登录名" min-width="140" />
         <el-table-column prop="email" label="邮箱" min-width="220" />
@@ -43,10 +43,33 @@
           </template>
         </el-table-column>
       </el-table>
+      <div v-else v-loading="accountStore.loading" class="user-card-list">
+        <article v-for="user in accountStore.users" :key="user.id" class="user-card">
+          <div class="user-card-head">
+            <div>
+              <strong>{{ user.display_name }}</strong>
+              <div>@{{ user.username }}</div>
+            </div>
+            <el-tag :type="user.is_active ? 'success' : 'info'">{{ user.is_active ? '启用' : '停用' }}</el-tag>
+          </div>
+          <dl class="user-card-fields">
+            <div><dt>邮箱</dt><dd>{{ user.email }}</dd></div>
+            <div><dt>角色</dt><dd><el-tag size="small" :type="roleTagType(user.role)">{{ user.role_label }}</el-tag></dd></div>
+          </dl>
+          <div class="permission-list">
+            <el-tag v-for="permission in user.permissions" :key="permission" effect="plain" size="small">
+              {{ permission }}
+            </el-tag>
+            <span v-if="!user.permissions.length" class="permission-empty">仅查看</span>
+          </div>
+          <el-button type="primary" plain class="user-edit-button" @click="openEditDialog(user)">编辑用户</el-button>
+        </article>
+        <el-empty v-if="accountStore.users.length === 0" description="暂无用户" />
+      </div>
     </el-card>
 
-    <el-dialog v-model="dialogVisible" :title="editingUser ? '编辑用户' : '新增用户'" width="560px">
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
+    <el-dialog v-model="dialogVisible" :title="editingUser ? '编辑用户' : '新增用户'" :width="dialogWidth">
+      <el-form ref="formRef" :model="form" :rules="rules" :label-width="isMobile ? 'auto' : '110px'" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="登录名" prop="username">
           <el-input v-model="form.username" :disabled="Boolean(editingUser)" placeholder="用于登录系统" />
         </el-form-item>
@@ -102,8 +125,10 @@ import { Plus } from '@element-plus/icons-vue'
 
 import { useAccountStore } from '../stores/account'
 import { validatePassword } from '../utils/password'
+import { useResponsive } from '../composables/useResponsive'
 
 const accountStore = useAccountStore()
+const { isMobile } = useResponsive()
 const dialogVisible = ref(false)
 const editingUser = ref(null)
 const formRef = ref(null)
@@ -121,6 +146,7 @@ const buildDefaultForm = () => ({
 const form = ref(buildDefaultForm())
 
 const isEditingCurrentUser = computed(() => editingUser.value?.id === accountStore.profile?.id)
+const dialogWidth = computed(() => isMobile.value ? 'calc(100vw - 24px)' : '560px')
 
 const rules = {
   username: [{ required: true, message: '请输入登录名', trigger: 'blur' }],
@@ -251,10 +277,98 @@ onMounted(async () => {
   font-size: 13px;
 }
 
+.user-card-list {
+  min-height: 120px;
+  display: grid;
+  gap: 12px;
+}
+
+.user-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.user-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.user-card-head strong {
+  color: #303133;
+  font-size: 15px;
+}
+
+.user-card-head div div {
+  margin-top: 5px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.user-card-fields {
+  margin: 14px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+.user-card-fields > div {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.user-card-fields dt,
+.user-card-fields dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.user-card-fields dt {
+  color: #909399;
+}
+
+.user-card-fields dd {
+  color: #606266;
+  overflow-wrap: anywhere;
+}
+
+.permission-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.user-edit-button {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 14px;
+}
+
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .page-header :deep(.el-button) {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  :deep(.el-dialog__body) {
+    max-height: calc(100dvh - 160px);
+    padding: 14px 16px;
+    overflow-y: auto;
+  }
+
+  :deep(.el-dialog__footer .el-button) {
+    min-width: 96px;
+    min-height: 42px;
   }
 }
 </style>
