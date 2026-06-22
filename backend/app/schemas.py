@@ -349,6 +349,7 @@ class RainfallStationResponse(BaseModel):
 
 class RainfallHourlyResponse(BaseModel):
     station_id: str
+    station_name: Optional[str] = None
     data_type: str
     hour_time: datetime
     rainfall_mm: Decimal
@@ -357,13 +358,24 @@ class RainfallHourlyResponse(BaseModel):
     source_endpoint: str
     raw_time_label: Optional[str] = ""
     source_updated_at: Optional[datetime]
+    first_seen_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+    revision_count: int = 0
 
     class Config:
         from_attributes = True
 
 
+class RainfallHourlyList(BaseModel):
+    items: List[RainfallHourlyResponse]
+    total: int
+    page: int
+    page_size: int
+
+
 class RainfallActualRevisionResponse(BaseModel):
     station_id: str
+    station_name: Optional[str] = None
     hour_time: datetime
     old_rainfall_mm: Decimal
     new_rainfall_mm: Decimal
@@ -375,6 +387,13 @@ class RainfallActualRevisionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class RainfallActualRevisionList(BaseModel):
+    items: List[RainfallActualRevisionResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 # ==================== System Config Schemas ====================

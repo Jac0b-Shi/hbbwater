@@ -5,6 +5,7 @@ python-dotenv==1.2.2
 
 # Database
 sqlalchemy==2.0.36
+greenlet>=3.5.2
 aiomysql==0.3.2
 aiosqlite==0.20.0
 alembic==1.14.0

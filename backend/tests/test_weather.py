@@ -25,6 +25,7 @@ try:
         RainfallForecastHourly,
         WeatherStation,
     )
+    from app.routers.weather import get_rainfall_history, get_rainfall_revisions
     from app.services.weather import (
         RainfallPoint,
         build_station_summary,
@@ -205,6 +206,100 @@ class WeatherStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(actual.rainfall_mm, Decimal("0.3"))
             self.assertEqual(revision.old_rainfall_mm, Decimal("0.1"))
             self.assertEqual(revision.new_rainfall_mm, Decimal("0.3"))
+
+    async def test_history_route_paginates_actual_records_with_revision_counts(self):
+        revised_hour = datetime(2026, 5, 23, 10)
+        previous_hour = revised_hour - timedelta(hours=1)
+        async with self.session_factory() as session:
+            session.add(WeatherStation(
+                station_id="A5151",
+                station_name="宝山大场上大附中",
+                role="primary",
+                is_active=True,
+            ))
+            await _upsert_rainfall_points(
+                session,
+                [
+                    self._actual_point(previous_hour, "0.2"),
+                    self._actual_point(revised_hour, "0.1"),
+                ],
+                reference_now=datetime(2026, 5, 23, 10, 45, tzinfo=timezone.utc),
+            )
+            await session.commit()
+            await _upsert_rainfall_points(
+                session,
+                [self._actual_point(revised_hour, "0.3")],
+                reference_now=datetime(2026, 5, 23, 11, 5, tzinfo=timezone.utc),
+            )
+            await session.commit()
+
+            page_one = await get_rainfall_history(
+                station_id="A5151",
+                data_type="actual",
+                start_time=previous_hour,
+                end_time=revised_hour,
+                limit=1,
+                page=1,
+                _={},
+                db=session,
+            )
+            page_two = await get_rainfall_history(
+                station_id="A5151",
+                data_type="actual",
+                start_time=previous_hour,
+                end_time=revised_hour,
+                limit=1,
+                page=2,
+                _={},
+                db=session,
+            )
+
+            self.assertEqual(page_one["total"], 2)
+            self.assertEqual(page_one["page_size"], 1)
+            self.assertEqual(page_one["items"][0]["hour_time"], revised_hour)
+            self.assertEqual(page_one["items"][0]["rainfall_mm"], Decimal("0.3"))
+            self.assertEqual(page_one["items"][0]["revision_count"], 1)
+            self.assertEqual(page_one["items"][0]["station_name"], "宝山大场上大附中")
+            self.assertEqual(page_two["items"][0]["hour_time"], previous_hour)
+
+    async def test_revisions_route_filters_by_revised_hour(self):
+        revised_hour = datetime(2026, 5, 23, 10)
+        async with self.session_factory() as session:
+            session.add(WeatherStation(
+                station_id="A5151",
+                station_name="宝山大场上大附中",
+                role="primary",
+                is_active=True,
+            ))
+            await _upsert_rainfall_points(
+                session,
+                [self._actual_point(revised_hour, "0.1")],
+                reference_now=datetime(2026, 5, 23, 10, 45, tzinfo=timezone.utc),
+            )
+            await session.commit()
+            await _upsert_rainfall_points(
+                session,
+                [self._actual_point(revised_hour, "0.3")],
+                reference_now=datetime(2026, 5, 23, 11, 5, tzinfo=timezone.utc),
+            )
+            await session.commit()
+
+            response = await get_rainfall_revisions(
+                station_id="A5151",
+                start_time=revised_hour,
+                end_time=revised_hour,
+                time_field="hour_time",
+                limit=10,
+                page=1,
+                _={},
+                db=session,
+            )
+
+            self.assertEqual(response["total"], 1)
+            self.assertEqual(response["items"][0]["hour_time"], revised_hour)
+            self.assertEqual(response["items"][0]["old_rainfall_mm"], Decimal("0.1"))
+            self.assertEqual(response["items"][0]["new_rainfall_mm"], Decimal("0.3"))
+            self.assertEqual(response["items"][0]["station_name"], "宝山大场上大附中")
 
     async def test_forecast_keeps_latest_batch_inside_rolling_24h_window(self):
         window_start = datetime(2026, 5, 23, 0)

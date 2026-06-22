@@ -9,6 +9,16 @@ const numericFields = [
   'stale_after_seconds'
 ]
 
+const rainfallNumericFields = [
+  'rainfall_mm',
+  'revision_count'
+]
+
+const rainfallRevisionNumericFields = [
+  'old_rainfall_mm',
+  'new_rainfall_mm'
+]
+
 function toNumber(value) {
   if (value === null || value === undefined || value === '') return null
   const number = Number(value)
@@ -39,6 +49,26 @@ function normalizeSummary(summary) {
     stale_after_seconds: toNumber(summary.stale_after_seconds),
     stations: (summary.stations || []).map(normalizeStation),
   }
+}
+
+function normalizeRainfallRecord(record) {
+  if (!record) return record
+  return rainfallNumericFields.reduce((normalized, field) => {
+    if (field in normalized) {
+      normalized[field] = toNumber(normalized[field])
+    }
+    return normalized
+  }, { ...record })
+}
+
+function normalizeRainfallRevision(revision) {
+  if (!revision) return revision
+  return rainfallRevisionNumericFields.reduce((normalized, field) => {
+    if (field in normalized) {
+      normalized[field] = toNumber(normalized[field])
+    }
+    return normalized
+  }, { ...revision })
 }
 
 export const useWeatherStore = defineStore('weather', () => {
@@ -88,10 +118,18 @@ export const useWeatherStore = defineStore('weather', () => {
 
   async function fetchHistory(params = {}) {
     const response = await axios.get('/api/weather/rainfall/history', { params })
-    return response.data.map((item) => ({
-      ...item,
-      rainfall_mm: toNumber(item.rainfall_mm),
-    }))
+    return {
+      ...response.data,
+      items: (response.data.items || []).map(normalizeRainfallRecord),
+    }
+  }
+
+  async function fetchRevisions(params = {}) {
+    const response = await axios.get('/api/weather/rainfall/revisions', { params })
+    return {
+      ...response.data,
+      items: (response.data.items || []).map(normalizeRainfallRevision),
+    }
   }
 
   return {
@@ -106,5 +144,6 @@ export const useWeatherStore = defineStore('weather', () => {
     fetchRainfallSummary,
     fetchStations,
     fetchHistory,
+    fetchRevisions,
   }
 })
