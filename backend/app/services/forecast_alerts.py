@@ -64,6 +64,8 @@ PROVISIONAL_VERTICAL_THRESHOLDS_CM = {
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "lambda_decay": 0.97,
     "pump_on_rise_mm": 50.0,
+    "pump_assumption": "inferred_q2",
+    "forecast_gap_ratio_threshold": 0.25,
     "net_drawdown_by_pump_count_cm_per_h": {
         "0": 0.0,
         "1": None,
@@ -166,7 +168,35 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
     for pump_count in ("0", "1", "2", "3"):
         if pump_count not in drawdown:
             drawdown[pump_count] = default_drawdown.get(pump_count)
+        value = drawdown[pump_count]
+        if value is not None and not isinstance(value, (int, float)):
+            drawdown[pump_count] = default_drawdown.get(pump_count)
+        if pump_count == "0" and drawdown[pump_count] != 0:
+            drawdown[pump_count] = 0.0
+        if value is not None and value < 0:
+            drawdown[pump_count] = default_drawdown.get(pump_count)
+    # Adjacent non-null values must be strictly increasing.
+    qs = [drawdown.get(str(i)) for i in range(1, 4)]
+    non_null = [(i, q) for i, q in enumerate(qs, start=1) if q is not None]
+    for i in range(len(non_null) - 1):
+        if non_null[i][1] >= non_null[i + 1][1]:
+            drawdown[str(non_null[i + 1][0])] = default_drawdown.get(str(non_null[i + 1][0]))
     validated["net_drawdown_by_pump_count_cm_per_h"] = drawdown
+
+    # Ensure pump_assumption is one of the allowed values.
+    pump_assumption = validated.get("pump_assumption")
+    if pump_assumption not in ("inferred_q2", "measured_q2", "none"):
+        validated["pump_assumption"] = DEFAULT_MODEL_PARAMS["pump_assumption"]
+
+    # Ensure forecast gap ratio threshold is within [0, 1].
+    gap_threshold = validated.get("forecast_gap_ratio_threshold")
+    try:
+        gap_threshold = float(gap_threshold)
+    except (TypeError, ValueError):
+        gap_threshold = DEFAULT_MODEL_PARAMS["forecast_gap_ratio_threshold"]
+    if not (0.0 <= gap_threshold <= 1.0):
+        gap_threshold = DEFAULT_MODEL_PARAMS["forecast_gap_ratio_threshold"]
+    validated["forecast_gap_ratio_threshold"] = gap_threshold
 
     # Reject the legacy single-pump-capacity field if present; replace with inferred table.
     if "pump_capacity_mm_per_min" in validated or "pump_capacity_mm_per_hour" in validated:
@@ -400,14 +430,18 @@ async def _select_rain_source(
         )
 
     end_time = now_hour + timedelta(hours=horizon_hours)
-    candidate_station_ids = [requested_station_id] if requested_station_id else []
-    if PRIMARY_OBSERVED_STATION not in candidate_station_ids:
-        candidate_station_ids.append(PRIMARY_OBSERVED_STATION)
+
+    # A5151 is the forced-priority forecast source. The profile's requested station
+    # (e.g. 58362) may only be used as an explicit fallback when A5151 is missing.
+    candidate_station_ids = [PRIMARY_OBSERVED_STATION]
+    if requested_station_id and requested_station_id != PRIMARY_OBSERVED_STATION:
+        candidate_station_ids.append(requested_station_id)
     for station in stations:
         if station.station_id not in candidate_station_ids:
             candidate_station_ids.append(station.station_id)
 
     forecast_station_id = None
+    fallback_station_id = None
     for station_id in candidate_station_ids:
         count = await db.scalar(
             select(func.count())
@@ -518,12 +552,12 @@ def _risk_from_thresholds(
     return "normal"
 
 
-def _risk_from_rise(
-    predicted_free_rise_mm: float,
-    predicted_observed_rise_mm: float,
+def _risk_from_rise_single(
+    rise_mm: float,
     profile: ForecastAlertProfile | None,
     params: dict[str, Any],
 ) -> str:
+    """Risk level from a single predicted rise value."""
     critical = _to_float(
         profile.critical_rise_mm if profile and profile.critical_rise_mm is not None else params.get("critical_rise_mm"),
         250.0,
@@ -533,14 +567,26 @@ def _risk_from_rise(
         120.0,
     )
     watch = _to_float(params.get("watch_rise_mm"), 80.0)
-    risk_basis = max(predicted_observed_rise_mm, predicted_free_rise_mm)
-    if risk_basis >= critical:
+    if rise_mm >= critical:
         return "critical"
-    if risk_basis >= warning:
+    if rise_mm >= warning:
         return "warning"
-    if predicted_observed_rise_mm >= watch or predicted_free_rise_mm >= watch:
+    if rise_mm >= watch:
         return "watch"
     return "normal"
+
+
+def _risk_from_rise(
+    predicted_free_rise_mm: float,
+    predicted_observed_rise_mm: float,
+    profile: ForecastAlertProfile | None,
+    params: dict[str, Any],
+) -> str:
+    """Deprecated combined wrapper: use _risk_from_rise_single per scenario."""
+    return _max_risk(
+        _risk_from_rise_single(predicted_free_rise_mm, profile, params),
+        _risk_from_rise_single(predicted_observed_rise_mm, profile, params),
+    )
 
 
 def _max_risk(*risks: str) -> str:
@@ -579,10 +625,13 @@ def _data_status_from_gaps_and_staleness(
     forecast_available: bool,
     has_forecast_gaps: bool,
     forecast_gap_ratio: float,
+    gap_ratio_threshold: float = 0.25,
 ) -> str:
     if not has_station or not has_reading or not forecast_available:
         return "unavailable"
-    if reading_stale or has_forecast_gaps or forecast_gap_ratio > 0.25:
+    if forecast_gap_ratio > gap_ratio_threshold:
+        return "unavailable"
+    if reading_stale or has_forecast_gaps:
         return "degraded"
     return "available"
 
@@ -664,6 +713,7 @@ async def _compute_prediction(
         profile.model_params if profile else None,
         profile.pump_params if profile else None,
     )
+    gap_ratio_threshold = _to_float(model_params.get("forecast_gap_ratio_threshold"), 0.25)
 
     rain_source = await _select_rain_source(
         db,
@@ -704,7 +754,11 @@ async def _compute_prediction(
         forecast_available=forecast_available,
         has_forecast_gaps=has_forecast_gaps,
         forecast_gap_ratio=forecast_gap_ratio,
+        gap_ratio_threshold=gap_ratio_threshold,
     )
+
+    can_auto_resolve = data_status == "available"
+    advisory_only = data_status != "available"
 
     # Shadow Mode sensor-consistency diagnosis; never used to suppress hazard alerts.
     consistency_diagnosis = await _sensor_consistency_diagnosis(
@@ -726,9 +780,15 @@ async def _compute_prediction(
             "data_status": data_status,
             "risk_level": "unknown",
             "model_risk": "unknown",
+            "risk_no_pump": "unknown",
+            "risk_q2_scenario": "unknown",
             "policy_floor": "normal",
             "effective_risk": "unknown",
             "policy_reason": None,
+            "can_auto_resolve": False,
+            "advisory_only": True,
+            "scenario_pump_count": None,
+            "pump_assumption": None,
             "should_notify": False,
             "decision_reason": "输入数据不可用，不生成风险结论",
             "latest_distance_cm": _to_float(latest_reading.water_level, None) if latest_reading else None,
@@ -738,7 +798,10 @@ async def _compute_prediction(
                 "rain_source_degraded": rain_source_degraded,
                 "degraded_reason": degraded_reason,
                 "forecast_gap_hours": forecast_gap_hours,
+                "forecast_gap_ratio": round(forecast_gap_ratio, 2),
                 "reading_stale": reading_stale,
+                "can_auto_resolve": False,
+                "advisory_only": True,
                 "sensor_consistency_diagnosis": consistency_diagnosis,
                 "threshold_provenance": threshold_provenance,
             },
@@ -759,9 +822,15 @@ async def _compute_prediction(
             "data_status": "unavailable",
             "risk_level": "unknown",
             "model_risk": "unknown",
+            "risk_no_pump": "unknown",
+            "risk_q2_scenario": "unknown",
             "policy_floor": "normal",
             "effective_risk": "unknown",
             "policy_reason": None,
+            "can_auto_resolve": False,
+            "advisory_only": True,
+            "scenario_pump_count": None,
+            "pump_assumption": None,
             "should_notify": False,
             "decision_reason": "没有可用于预测的最新超声波测距读数",
             "features": {
@@ -805,14 +874,28 @@ async def _compute_prediction(
 
     for item in forecast_series:
         if item["is_gap"]:
+            # Gaps advance time decay without adding rainfall pressure.
+            free_level = max(0.0, free_level * lambda_decay)
+            observed_level = max(0.0, observed_level * lambda_decay)
+            scenario_pump_count = 2 if observed_level > pump_on_rise_mm else 0
+            pump_output_mm = 0.0
+            if scenario_pump_count > 0:
+                pump_output_mm = q2_mm_per_h
+                observed_level = max(0.0, observed_level - pump_output_mm)
+            if free_level > peak_free:
+                peak_free = free_level
+                peak_time = item["hour_time"]
+            peak_observed = max(peak_observed, observed_level)
             predicted_series.append({
                 "hour_time": item["hour_time"].isoformat(),
                 "rainfall_mm": None,
                 "rainfall_pressure_mm": None,
                 "free_rise_mm": round(free_level, 2),
                 "observed_rise_mm": round(observed_level, 2),
-                "pump_active": False,
-                "pump_output_mm": 0.0,
+                "scenario_pump_count": scenario_pump_count,
+                "pump_assumption": "inferred_q2" if scenario_pump_count > 0 else "none",
+                "actual_pump_state": "unknown",
+                "pump_output_mm": round(pump_output_mm, 2),
                 "is_gap": True,
             })
             continue
@@ -820,9 +903,9 @@ async def _compute_prediction(
         pressure = _rainfall_pressure_mm(item["rainfall_mm"], model_params)
         free_level = max(0.0, free_level * lambda_decay + pressure)
         observed_level = max(0.0, observed_level * lambda_decay + pressure)
-        pump_active = observed_level > pump_on_rise_mm
+        scenario_pump_count = 2 if observed_level > pump_on_rise_mm else 0
         pump_output_mm = 0.0
-        if pump_active:
+        if scenario_pump_count > 0:
             pump_output_mm = q2_mm_per_h
             observed_level = max(0.0, observed_level - pump_output_mm)
 
@@ -836,7 +919,9 @@ async def _compute_prediction(
             "rainfall_pressure_mm": round(pressure, 2),
             "free_rise_mm": round(free_level, 2),
             "observed_rise_mm": round(observed_level, 2),
-            "pump_active": pump_active,
+            "scenario_pump_count": scenario_pump_count,
+            "pump_assumption": "inferred_q2" if scenario_pump_count > 0 else "none",
+            "actual_pump_state": "unknown",
             "pump_output_mm": round(pump_output_mm, 2),
         })
 
@@ -844,13 +929,30 @@ async def _compute_prediction(
     predicted_free_rise_mm = h_start_mm + peak_free
     predicted_observed_rise_mm = h_start_mm + peak_observed
 
-    model_threshold_risk = _risk_from_thresholds(sensor, baseline_cm - predicted_observed_rise_mm / 10)
-    model_rise_risk = _risk_from_rise(predicted_free_rise_mm, predicted_observed_rise_mm, profile, model_params)
-    model_risk = _max_risk(model_threshold_risk, model_rise_risk)
+    projected_distance_no_pump_cm = baseline_cm - predicted_free_rise_mm / 10
+    projected_distance_q2_cm = baseline_cm - predicted_observed_rise_mm / 10
+
+    risk_no_pump = _max_risk(
+        _risk_from_thresholds(sensor, projected_distance_no_pump_cm),
+        _risk_from_rise_single(predicted_free_rise_mm, profile, model_params),
+    )
+    risk_q2_scenario = _max_risk(
+        _risk_from_thresholds(sensor, projected_distance_q2_cm),
+        _risk_from_rise_single(predicted_observed_rise_mm, profile, model_params),
+    )
+    model_risk = _max_risk(risk_no_pump, risk_q2_scenario)
 
     policy_floor, policy_reason = _policy_floor(p_total, i_1h_max, model_params)
-    effective_risk = _max_risk(model_risk, policy_floor)
-    should_notify = effective_risk in {"warning", "critical"}
+
+    # Degraded or unavailable data must not produce new safety conclusions.
+    if data_status != "available":
+        effective_risk = "unknown"
+        should_notify = False
+        risk_level_for_lifecycle = "unknown"
+    else:
+        effective_risk = _max_risk(model_risk, policy_floor)
+        should_notify = effective_risk in {"warning", "critical"}
+        risk_level_for_lifecycle = effective_risk
 
     confidence = 0.75
     if not has_baseline:
@@ -874,6 +976,8 @@ async def _compute_prediction(
         "rain_source_degraded": rain_source_degraded,
         "degraded_reason": degraded_reason,
         "data_status": data_status,
+        "can_auto_resolve": can_auto_resolve,
+        "advisory_only": advisory_only,
         "forecast_hours_available": len(rows),
         "forecast_gap_hours": forecast_gap_hours,
         "forecast_gap_ratio": round(forecast_gap_ratio, 2),
@@ -886,6 +990,8 @@ async def _compute_prediction(
         "h_start_mm": round(h_start_mm, 2),
         "has_baseline": has_baseline,
         "model_risk": model_risk,
+        "risk_no_pump": risk_no_pump,
+        "risk_q2_scenario": risk_q2_scenario,
         "policy_floor": policy_floor,
         "effective_risk": effective_risk,
         "policy_reason": policy_reason,
@@ -895,6 +1001,7 @@ async def _compute_prediction(
         "validated_params": {
             "lambda_decay": model_params.get("lambda_decay"),
             "pump_on_rise_mm": model_params.get("pump_on_rise_mm"),
+            "forecast_gap_ratio_threshold": gap_ratio_threshold,
             "net_drawdown_by_pump_count_cm_per_h": model_params.get("net_drawdown_by_pump_count_cm_per_h"),
             "drawdown_parameter_status": model_params.get("drawdown_parameter_status"),
         },
@@ -933,9 +1040,15 @@ async def _compute_prediction(
         "data_status": data_status,
         "risk_level": effective_risk,
         "model_risk": model_risk,
+        "risk_no_pump": risk_no_pump,
+        "risk_q2_scenario": risk_q2_scenario,
         "policy_floor": policy_floor,
         "effective_risk": effective_risk,
         "policy_reason": policy_reason,
+        "can_auto_resolve": can_auto_resolve,
+        "advisory_only": advisory_only,
+        "scenario_pump_count": 2 if (predicted_observed_rise_mm < predicted_free_rise_mm) else 0,
+        "pump_assumption": "inferred_q2" if (predicted_observed_rise_mm < predicted_free_rise_mm) else "none",
         "should_notify": should_notify,
         "horizon_hours": horizon_hours,
         "forecast_issued_at": forecast_issued_at,
@@ -994,9 +1107,13 @@ def _build_alert_details(result: ForecastPredictionResult) -> dict[str, Any]:
         "data_status": result.data_status,
         "risk_level": result.risk_level,
         "model_risk": result.model_risk,
+        "risk_no_pump": result.risk_no_pump,
+        "risk_q2_scenario": result.risk_q2_scenario,
         "policy_floor": result.policy_floor,
         "effective_risk": result.effective_risk,
         "policy_reason": result.policy_reason,
+        "can_auto_resolve": result.can_auto_resolve,
+        "advisory_only": result.advisory_only,
         "horizon_hours": result.horizon_hours,
         "forecast_issued_at": result.forecast_issued_at.isoformat() if result.forecast_issued_at else None,
         "peak_time": result.peak_time.isoformat() if result.peak_time else None,
@@ -1021,8 +1138,8 @@ async def _handle_forecast_alert_lifecycle(
     now: datetime,
 ) -> tuple[Alert | None, bool]:
     active_alerts = await _active_forecast_alerts(db, sensor.sensor_id)
-    if result.data_status == "unavailable" or result.risk_level in {"unknown"}:
-        # Do not create new conclusions and do not auto-clear existing alerts.
+    if not result.can_auto_resolve or result.risk_level in {"unknown"}:
+        # Degraded/unavailable data must not create new conclusions or auto-clear existing alerts.
         return None, False
     if not result.should_notify:
         await _resolve_forecast_alerts(db, sensor.sensor_id, now)
@@ -1140,9 +1257,15 @@ async def evaluate_forecast_alerts(
                 data_status=prediction.get("data_status", "unavailable"),
                 risk_level=prediction.get("risk_level", "unknown"),
                 model_risk=prediction.get("model_risk"),
+                risk_no_pump=prediction.get("risk_no_pump"),
+                risk_q2_scenario=prediction.get("risk_q2_scenario"),
                 policy_floor=prediction.get("policy_floor"),
                 effective_risk=prediction.get("effective_risk"),
                 policy_reason=prediction.get("policy_reason"),
+                can_auto_resolve=bool(prediction.get("can_auto_resolve", False)),
+                advisory_only=bool(prediction.get("advisory_only", True)),
+                scenario_pump_count=prediction.get("scenario_pump_count"),
+                pump_assumption=prediction.get("pump_assumption"),
                 should_notify=bool(prediction.get("should_notify")),
                 notification_sent=False,
                 horizon_hours=prediction.get("horizon_hours") or effective_horizon,
@@ -1197,8 +1320,15 @@ async def evaluate_forecast_alerts(
     run.forecast_issued_at = latest_forecast_issued_at
     run.completed_at = utcnow_naive()
     await db.flush()
-    await db.refresh(run, attribute_names=["results"])
-    return run
+    # Eagerly load results to avoid lazy-loading issues for callers.
+    run_with_results = (
+        await db.execute(
+            select(ForecastPredictionRun)
+            .where(ForecastPredictionRun.id == run.id)
+            .options(selectinload(ForecastPredictionRun.results))
+        )
+    ).scalar_one()
+    return run_with_results
 
 
 async def run_scheduled_forecast_evaluation() -> None:

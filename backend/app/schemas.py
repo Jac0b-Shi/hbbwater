@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Union
 from decimal import Decimal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def normalize_datetime_to_utc_naive(value: Optional[datetime]) -> Optional[datetime]:
@@ -398,6 +398,62 @@ class RainfallActualRevisionList(BaseModel):
 
 # ==================== Forecast Alert Schemas ====================
 
+class ForecastPumpParams(BaseModel):
+    """Strict schema for pump drawdown parameters."""
+
+    model_config = {"extra": "forbid"}
+
+    net_drawdown_by_pump_count_cm_per_h: Dict[str, Optional[float]] = Field(
+        default_factory=lambda: {"0": 0.0, "1": None, "2": 6.23, "3": None},
+    )
+    drawdown_parameter_status: Dict[str, Optional[str]] = Field(
+        default_factory=lambda: {"0": "defined", "1": "unknown", "2": "inferred", "3": "unknown"},
+    )
+    calibration_version: Optional[str] = None
+
+    @field_validator("net_drawdown_by_pump_count_cm_per_h", mode="after")
+    @classmethod
+    def validate_drawdown_table(cls, v: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
+        for key in ("0", "1", "2", "3"):
+            if key not in v:
+                raise ValueError(f"net_drawdown_by_pump_count_cm_per_h must include pump count {key}")
+            value = v.get(key)
+            if value is not None:
+                if not isinstance(value, (int, float)):
+                    raise ValueError(f"drawdown for pump count {key} must be a number or null")
+                if value < 0:
+                    raise ValueError(f"drawdown for pump count {key} must be non-negative or null")
+            if key == "0" and value != 0:
+                raise ValueError("drawdown for pump count 0 must be exactly 0")
+        # Adjacent non-null values must be strictly increasing.
+        qs = [v.get(str(i)) for i in range(1, 4)]
+        non_null = [(i, q) for i, q in enumerate(qs, start=1) if q is not None]
+        for i in range(len(non_null) - 1):
+            if non_null[i][1] >= non_null[i + 1][1]:
+                raise ValueError(f"q{non_null[i][0]} must be less than q{non_null[i + 1][0]}")
+        return v
+
+
+class ForecastModelParams(BaseModel):
+    """Strict schema for heuristic forecast model parameters."""
+
+    model_config = {"extra": "forbid"}
+
+    lambda_decay: float = Field(default=0.97, ge=0, le=1)
+    watch_rise_mm: float = Field(default=80.0, ge=0)
+    warning_rise_mm: float = Field(default=120.0, ge=0)
+    critical_rise_mm: float = Field(default=250.0, ge=0)
+    pump_on_rise_mm: float = Field(default=50.0, ge=0)
+    pump_assumption: str = Field(default="inferred_q2", pattern="^(inferred_q2|measured_q2|none)$")
+    forecast_gap_ratio_threshold: float = Field(default=0.25, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_rise_order(self):
+        if not (self.watch_rise_mm < self.warning_rise_mm < self.critical_rise_mm):
+            raise ValueError("watch_rise_mm < warning_rise_mm < critical_rise_mm is required")
+        return self
+
+
 class ForecastAlertGlobalConfig(BaseModel):
     enabled: bool = False
     cooldown_minutes: int = Field(default=120, ge=5, le=1440)
@@ -420,14 +476,35 @@ class ForecastAlertGlobalConfig(BaseModel):
                 if key not in drawdown:
                     raise ValueError(f"net_drawdown_by_pump_count_cm_per_h must include pump count {key}")
                 value = drawdown[key]
-                if value is not None and value < 0:
-                    raise ValueError(f"drawdown for pump count {key} must be non-negative or null")
+                if value is not None:
+                    if not isinstance(value, (int, float)):
+                        raise ValueError(f"drawdown for pump count {key} must be a number or null")
+                    if value < 0:
+                        raise ValueError(f"drawdown for pump count {key} must be non-negative or null")
+                if key == "0" and value != 0:
+                    raise ValueError("drawdown for pump count 0 must be exactly 0")
+            qs = [drawdown.get(str(i)) for i in range(1, 4)]
+            non_null = [(i, q) for i, q in enumerate(qs, start=1) if q is not None]
+            for i in range(len(non_null) - 1):
+                if non_null[i][1] >= non_null[i + 1][1]:
+                    raise ValueError(f"q{non_null[i][0]} must be less than q{non_null[i + 1][0]}")
 
         # Validate lambda_decay
         if "lambda_decay" in v:
             ld = v["lambda_decay"]
             if not isinstance(ld, (int, float)) or not (0.0 <= ld <= 1.0):
                 raise ValueError("lambda_decay must be between 0 and 1")
+
+        # Validate pump_assumption
+        if "pump_assumption" in v:
+            if v["pump_assumption"] not in ("inferred_q2", "measured_q2", "none"):
+                raise ValueError("pump_assumption must be inferred_q2, measured_q2, or none")
+
+        # Validate forecast_gap_ratio_threshold
+        if "forecast_gap_ratio_threshold" in v:
+            gt = v["forecast_gap_ratio_threshold"]
+            if not isinstance(gt, (int, float)) or not (0.0 <= gt <= 1.0):
+                raise ValueError("forecast_gap_ratio_threshold must be between 0 and 1")
 
         # Validate rise thresholds
         for key in ("watch_rise_mm", "warning_rise_mm", "critical_rise_mm"):
@@ -451,8 +528,8 @@ class ForecastAlertProfilePayload(BaseModel):
     horizon_hours: int = Field(default=6, ge=1, le=24)
     warning_rise_mm: Optional[Decimal] = Field(None, ge=0)
     critical_rise_mm: Optional[Decimal] = Field(None, ge=0)
-    model_params: Optional[Dict[str, Any]] = None
-    pump_params: Optional[Dict[str, Any]] = None
+    model_params: Optional[ForecastModelParams] = None
+    pump_params: Optional[ForecastPumpParams] = None
     actuator_binding_id: Optional[str] = Field(None, max_length=100)
 
 
@@ -493,9 +570,15 @@ class ForecastPredictionResultResponse(BaseModel):
     data_status: str = "unavailable"
     risk_level: str
     model_risk: Optional[str]
+    risk_no_pump: Optional[str]
+    risk_q2_scenario: Optional[str]
     policy_floor: Optional[str]
     effective_risk: Optional[str]
     policy_reason: Optional[str]
+    can_auto_resolve: bool = False
+    advisory_only: bool = False
+    scenario_pump_count: Optional[int]
+    pump_assumption: Optional[str]
     should_notify: bool
     notification_sent: bool
     alert_id: Optional[int]

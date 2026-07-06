@@ -180,10 +180,29 @@
               <el-tag :type="getRiskType(row.risk_level)">{{ getRiskText(row.risk_level) }}</el-tag>
             </template>
           </el-table-column>
+          <el-table-column prop="data_status" label="数据" width="100">
+            <template #default="{ row }">
+              <el-tag :type="getDataStatusType(row.data_status)" size="small">{{ getDataStatusText(row.data_status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="rain_source_degraded" label="雨量源" width="120">
+            <template #default="{ row }">
+              <el-tag v-if="row.rain_source_degraded" type="warning" size="small">{{ row.forecast_station_id }}降级</el-tag>
+              <el-tag v-else type="success" size="small">{{ row.forecast_station_id || '无' }}</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="sensor_id" label="传感器" width="150" />
           <el-table-column prop="station_id" label="雨量站" width="110" />
           <el-table-column label="未来窗口" width="100">
             <template #default="{ row }">{{ row.horizon_hours }}h</template>
+          </el-table-column>
+          <el-table-column label="风险来源" width="180">
+            <template #default="{ row }">
+              <el-space wrap>
+                <el-tag v-if="row.model_risk && row.model_risk !== 'normal'" type="info" size="small">模型: {{ getRiskText(row.model_risk) }}</el-tag>
+                <el-tag v-if="row.policy_floor && row.policy_floor !== 'normal'" type="danger" size="small">策略: {{ getRiskText(row.policy_floor) }}</el-tag>
+              </el-space>
+            </template>
           </el-table-column>
           <el-table-column label="峰值时间" width="180">
             <template #default="{ row }">{{ formatTime(row.peak_time) }}</template>
@@ -214,7 +233,9 @@
             <div class="alert-card-head">
               <div class="alert-card-tags">
                 <el-tag :type="getRiskType(result.risk_level)">{{ getRiskText(result.risk_level) }}</el-tag>
-                <el-tag effect="plain">{{ result.station_id || '无雨量站' }}</el-tag>
+                <el-tag :type="getDataStatusType(result.data_status)" size="small">{{ getDataStatusText(result.data_status) }}</el-tag>
+                <el-tag v-if="result.rain_source_degraded" type="warning" size="small">{{ result.forecast_station_id }}降级</el-tag>
+                <el-tag v-else type="success" size="small">{{ result.forecast_station_id || '无雨量站' }}</el-tag>
               </div>
               <el-tag size="small" :type="result.notification_sent ? 'success' : 'info'">
                 {{ result.notification_sent ? '已通知' : '未通知' }}
@@ -224,6 +245,8 @@
             <dl class="alert-card-meta">
               <div><dt>传感器</dt><dd>{{ result.sensor_id }}</dd></div>
               <div><dt>峰值</dt><dd>{{ formatTime(result.peak_time) }}</dd></div>
+              <div v-if="result.model_risk && result.model_risk !== 'normal'"><dt>模型风险</dt><dd><el-tag type="info" size="small">{{ getRiskText(result.model_risk) }}</el-tag></dd></div>
+              <div v-if="result.policy_floor && result.policy_floor !== 'normal'"><dt>策略下限</dt><dd><el-tag type="danger" size="small">{{ getRiskText(result.policy_floor) }}</el-tag></dd></div>
               <div><dt>无泵上涨</dt><dd>{{ formatMm(result.predicted_free_rise_mm) }}</dd></div>
               <div><dt>预计测距</dt><dd>{{ formatCm(result.projected_distance_cm) }}</dd></div>
             </dl>
@@ -307,13 +330,23 @@ const formatCm = (value) => value === null || value === undefined ? '-' : `${Num
 const formatPercent = (value) => value === null || value === undefined ? '-' : `${Math.round(Number(value) * 100)}%`
 
 const getRiskType = (risk) => {
-  const map = { normal: 'success', watch: 'info', warning: 'warning', critical: 'danger' }
+  const map = { normal: 'success', watch: 'info', warning: 'warning', critical: 'danger', unknown: 'info' }
   return map[risk] || 'info'
 }
 
 const getRiskText = (risk) => {
-  const map = { normal: '正常', watch: '关注', warning: '预警', critical: '危险' }
+  const map = { normal: '正常', watch: '关注', warning: '预警', critical: '危险', unknown: '未知' }
   return map[risk] || risk
+}
+
+const getDataStatusType = (status) => {
+  const map = { available: 'success', degraded: 'warning', unavailable: 'danger' }
+  return map[status] || 'info'
+}
+
+const getDataStatusText = (status) => {
+  const map = { available: '正常', degraded: '降级', unavailable: '不可用' }
+  return map[status] || status
 }
 
 const forecastSeverity = (risk) => {

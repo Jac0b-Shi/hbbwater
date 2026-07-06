@@ -15,23 +15,26 @@ if BACKEND_ROOT not in sys.path:
 IMPORT_ERROR = None
 
 try:
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.database import BusinessBase, ControlBase
     from app.models import (
         Alert,
+        AlertType,
         ForecastAlertProfile,
         ForecastPredictionResult,
         RainfallActualHourly,
         RainfallForecastHourly,
         Sensor,
         SensorReading,
+        Severity,
         WeatherStation,
     )
     from app.services.forecast_alerts import (
         FORECAST_ALERT_ENABLED_KEY,
         evaluate_forecast_alerts,
+        upsert_forecast_alert_profiles,
     )
     from app.services.system_config import set_config_value
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
@@ -82,7 +85,7 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
         return station
 
     async def _seed_sensor(self, session, *, baseline=Decimal("100"), latest=Decimal("100"), warning=Decimal("95"), danger=Decimal("90")):
-        now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        now = datetime.utcnow()
         sensor = Sensor(
             sensor_id="ultrasonic_002",
             sensor_type="ultrasonic",
@@ -99,7 +102,7 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             sensor_type="ultrasonic",
             water_level=latest,
             status="normal",
-            recorded_at=now_hour,
+            recorded_at=now,
         )
         profile = ForecastAlertProfile(
             sensor_id="ultrasonic_002",
@@ -189,7 +192,7 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_rain_does_not_double_count_baseline(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
             await self._seed_station(session, "A5151")
-            await self._seed_sensor(session, baseline=Decimal("100"), latest=Decimal("95"))
+            await self._seed_sensor(session, baseline=Decimal("100"), latest=Decimal("96"))
             await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
             await session.commit()
 
@@ -197,12 +200,12 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
             result = run.results[0]
-            # Baseline 100 cm, latest 95 cm -> existing rise 50 mm.
-            # No future rain -> predicted rise should be exactly 50 mm, not 100 mm.
-            self.assertEqual(result.predicted_free_rise_mm, Decimal("50"))
-            self.assertEqual(result.predicted_observed_rise_mm, Decimal("50"))
-            # Projected distance = baseline - predicted_rise / 10 = 100 - 5 = 95 cm.
-            self.assertEqual(result.projected_distance_cm, Decimal("95"))
+            # Baseline 100 cm, latest 96 cm -> existing rise 40 mm.
+            # No future rain -> predicted rise should be exactly 40 mm, not 80 mm.
+            self.assertEqual(result.predicted_free_rise_mm, Decimal("40"))
+            self.assertEqual(result.predicted_observed_rise_mm, Decimal("40"))
+            # Projected distance = baseline - predicted_rise / 10 = 100 - 4 = 96 cm.
+            self.assertEqual(result.projected_distance_cm, Decimal("96"))
             self.assertEqual(result.risk_level, "normal")
 
     async def test_data_missing_does_not_auto_resolve_active_alert(self):
@@ -320,11 +323,16 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
 
             result = run.results[0]
             series = result.series or []
-            pump_outputs = [s.get("pump_output_mm", 0) for s in series if s.get("pump_active")]
+            pump_outputs = [s.get("pump_output_mm", 0) for s in series if s.get("scenario_pump_count")]
             self.assertTrue(pump_outputs)
             # q2 is ~62.3 mm/h (6.23 cm/h). It must not be a per-pump capacity scaled by count.
             for output in pump_outputs:
                 self.assertAlmostEqual(output, 62.3, places=0)
+            # The assumption must be explicit, not pretending to be actual pump state.
+            active = [s for s in series if s.get("scenario_pump_count")]
+            for step in active:
+                self.assertEqual(step.get("pump_assumption"), "inferred_q2")
+                self.assertEqual(step.get("actual_pump_state"), "unknown")
 
     async def test_sensor_consistency_diagnosis_is_shadow_mode_only(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
@@ -381,6 +389,138 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(provenance)
             self.assertTrue(provenance.get("provisional_vertical_assumption"))
             self.assertIn("not final PLC setpoints", provenance.get("reason", ""))
+
+    async def test_a5151_forced_priority_over_profile_station_id(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            # A5151 and 58362 both have forecasts, but the profile requests 58362.
+            await self._seed_station(session, "A5151")
+            await self._seed_station(session, "58362")
+            _, _, profile = await self._seed_sensor(session)
+            profile.station_id = "58362"
+            now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            for i, v in enumerate([5, 5, 5, 0, 0, 0]):
+                session.add(RainfallForecastHourly(station_id="A5151", hour_time=now_hour + timedelta(hours=i), rainfall_mm=Decimal(str(v)), batch_time=now_hour, forecast_issued_at=now_hour))
+            for i, v in enumerate([0, 0, 0, 0, 0, 0]):
+                session.add(RainfallForecastHourly(station_id="58362", hour_time=now_hour + timedelta(hours=i), rainfall_mm=Decimal(str(v)), batch_time=now_hour, forecast_issued_at=now_hour))
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            # A5151 must be forced priority even when the profile asks for 58362.
+            self.assertEqual(result.forecast_station_id, "A5151")
+            self.assertFalse(result.rain_source_degraded)
+
+    async def test_degraded_data_does_not_auto_resolve_active_alert(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, reading, profile = await self._seed_sensor(session)
+            await self._seed_forecast(session, "A5151", [20, 20, 20, 0, 0, 0])
+            await session.commit()
+
+            await set_config_value(control, FORECAST_ALERT_ENABLED_KEY, "true", "forecast alerts")
+            await control.commit()
+
+            # Create an active forecast alert first.
+            alert = Alert(
+                sensor_id="ultrasonic_002",
+                alert_type=AlertType.FORECAST_HIGH_WATER.value,
+                severity=Severity.HIGH.value,
+                message="existing alert",
+                details={},
+                created_at=datetime.utcnow(),
+                is_resolved=False,
+            )
+            session.add(alert)
+            await session.commit()
+
+            # Make the latest reading stale; this yields a degraded result.
+            reading.recorded_at = datetime.utcnow() - timedelta(seconds=sensor.normal_interval * 3)
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=False)
+            await session.commit()
+
+            result = (
+                await session.execute(
+                    select(ForecastPredictionResult)
+                    .where(ForecastPredictionResult.run_id == run.id)
+                    .order_by(ForecastPredictionResult.id.desc())
+                )
+            ).scalars().first()
+            self.assertEqual(result.data_status, "degraded")
+            self.assertFalse(result.can_auto_resolve)
+            self.assertEqual(result.risk_level, "unknown")
+            # Active alert must not be auto-resolved by degraded data.
+            active = (await session.execute(select(Alert).where(Alert.id == alert.id))).scalar_one()
+            self.assertFalse(active.is_resolved)
+
+    async def test_stale_reading_returns_unknown(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, reading, profile = await self._seed_sensor(session)
+            # Make the reading stale (older than 2x normal_interval).
+            reading.recorded_at = datetime.utcnow() - timedelta(seconds=sensor.normal_interval * 3)
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertTrue(result.features.get("reading_stale"))
+            self.assertEqual(result.data_status, "degraded")
+            self.assertEqual(result.risk_level, "unknown")
+            self.assertFalse(result.can_auto_resolve)
+            self.assertTrue(result.advisory_only)
+
+    async def test_severe_forecast_gaps_return_unknown(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session)
+            now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            # Only 1 out of 6 hours has data: gap ratio 5/6 > 0.25 threshold.
+            for i in [0]:
+                session.add(RainfallForecastHourly(station_id="A5151", hour_time=now_hour + timedelta(hours=i), rainfall_mm=Decimal("5"), batch_time=now_hour, forecast_issued_at=now_hour))
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertEqual(result.data_status, "unavailable")
+            self.assertEqual(result.risk_level, "unknown")
+            self.assertFalse(result.can_auto_resolve)
+
+    async def test_invalid_profile_pump_params_rejected(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session)
+            await session.commit()
+
+            # Schema-level strict validation must reject negative drawdowns.
+            from app.schemas import ForecastPumpParams
+            with self.assertRaises(ValueError):
+                ForecastPumpParams(
+                    net_drawdown_by_pump_count_cm_per_h={
+                        "0": 0.0,
+                        "1": None,
+                        "2": -5.0,
+                        "3": None,
+                    }
+                )
+
+            # Zero-pump drawdown must be exactly 0.
+            with self.assertRaises(ValueError):
+                ForecastPumpParams(
+                    net_drawdown_by_pump_count_cm_per_h={
+                        "0": 1.0,
+                        "1": None,
+                        "2": 6.23,
+                        "3": None,
+                    }
+                )
 
 
 if __name__ == "__main__":
