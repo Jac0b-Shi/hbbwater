@@ -46,6 +46,21 @@ FORECAST_ALERT_MODEL_PARAMS_KEY = "forecast_alert_model_params"
 MODEL_VERSION = "heuristic_pressure_v1"
 PRIMARY_OBSERVED_STATION = "A5151"
 
+SENSOR_CONSISTENCY_MODEL = {
+    "reference_sensor_id": "ultrasonic_002",
+    "target_sensor_id": "ultrasonic_003",
+    "slope": 0.9840,
+    "intercept_cm": -9.26,
+    "median_abs_residual_cm": 0.11,
+    "p95_abs_residual_cm": 0.42,
+    "calibration_sample_size": 3145,
+}
+
+PROVISIONAL_VERTICAL_THRESHOLDS_CM = {
+    "ultrasonic_002": {"warning_level_cm": 81.2, "danger_level_cm": 70.6},
+    "ultrasonic_003": {"warning_level_cm": 70.6, "danger_level_cm": 60.0},
+}
+
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "lambda_decay": 0.97,
     "pump_on_rise_mm": 50.0,
@@ -545,7 +560,6 @@ def _drawdown_for_pump_count(params: dict[str, Any], pump_count: int) -> float |
 
 
 def _policy_floor(
-    rainfall_values: list[float | None],
     p_total: float,
     i_1h_max: float,
     params: dict[str, Any],
@@ -571,6 +585,68 @@ def _data_status_from_gaps_and_staleness(
     if reading_stale or has_forecast_gaps or forecast_gap_ratio > 0.25:
         return "degraded"
     return "available"
+
+
+async def _sensor_consistency_diagnosis(
+    db: AsyncSession,
+    reference_sensor_id: str,
+    target_sensor_id: str,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Compute 002->003 affine mapping residual for Shadow Mode diagnosis only.
+
+    This result is purely diagnostic and must not be used to suppress hazard alerts.
+    """
+    reference = await _latest_sensor_reading(db, reference_sensor_id, now=now)
+    target = await _latest_sensor_reading(db, target_sensor_id, now=now)
+    if reference is None or target is None:
+        return None
+
+    reference_level = _to_float(reference["reading"].water_level, None)
+    target_level = _to_float(target["reading"].water_level, None)
+    if reference_level is None or target_level is None:
+        return None
+
+    model = SENSOR_CONSISTENCY_MODEL
+    expected_target = model["slope"] * reference_level + model["intercept_cm"]
+    residual = target_level - expected_target
+    return {
+        "reference_sensor_id": reference_sensor_id,
+        "target_sensor_id": target_sensor_id,
+        "reference_level_cm": round(reference_level, 2),
+        "target_level_cm": round(target_level, 2),
+        "expected_target_cm": round(expected_target, 2),
+        "residual_cm": round(residual, 2),
+        "median_abs_residual_cm": model["median_abs_residual_cm"],
+        "p95_abs_residual_cm": model["p95_abs_residual_cm"],
+        "calibration_sample_size": model["calibration_sample_size"],
+        "diagnostic_only": True,
+    }
+
+
+def _threshold_provenance(sensor: Sensor) -> dict[str, Any]:
+    """Mark whether the configured thresholds are provisional vertical-install assumptions."""
+    warning = _to_float(sensor.warning_level, None)
+    danger = _to_float(sensor.danger_level, None)
+    provisional = PROVISIONAL_VERTICAL_THRESHOLDS_CM.get(sensor.sensor_id)
+    if provisional is None:
+        return {
+            "provisional_vertical_assumption": False,
+            "reason": "No known provisional threshold mapping for this sensor.",
+        }
+    warning_match = warning is not None and abs(warning - provisional["warning_level_cm"]) < 0.05
+    danger_match = danger is not None and abs(danger - provisional["danger_level_cm"]) < 0.05
+    return {
+        "provisional_vertical_assumption": warning_match and danger_match,
+        "reason": (
+            "Thresholds match the first-overflow vertical-install assumption; not final PLC setpoints."
+            if (warning_match and danger_match)
+            else "Configured thresholds do not match the provisional vertical assumption."
+        ),
+        "expected_warning_cm": provisional["warning_level_cm"],
+        "expected_danger_cm": provisional["danger_level_cm"],
+    }
 
 
 async def _compute_prediction(
@@ -630,6 +706,15 @@ async def _compute_prediction(
         forecast_gap_ratio=forecast_gap_ratio,
     )
 
+    # Shadow Mode sensor-consistency diagnosis; never used to suppress hazard alerts.
+    consistency_diagnosis = await _sensor_consistency_diagnosis(
+        db,
+        SENSOR_CONSISTENCY_MODEL["reference_sensor_id"],
+        SENSOR_CONSISTENCY_MODEL["target_sensor_id"],
+        now=now,
+    )
+    threshold_provenance = _threshold_provenance(sensor)
+
     # If data is unavailable, do not create new risk conclusions or clear existing alerts.
     if data_status == "unavailable":
         return {
@@ -654,6 +739,8 @@ async def _compute_prediction(
                 "degraded_reason": degraded_reason,
                 "forecast_gap_hours": forecast_gap_hours,
                 "reading_stale": reading_stale,
+                "sensor_consistency_diagnosis": consistency_diagnosis,
+                "threshold_provenance": threshold_provenance,
             },
             "series": [],
             "control_recommendation": {"mode": "recommendation_only", "executable": False, "action": "none"},
@@ -681,6 +768,8 @@ async def _compute_prediction(
                 "actual_station_id": actual_station_id,
                 "forecast_station_id": forecast_station_id,
                 "rain_source_degraded": rain_source_degraded,
+                "sensor_consistency_diagnosis": consistency_diagnosis,
+                "threshold_provenance": threshold_provenance,
             },
             "series": [],
             "control_recommendation": {"mode": "recommendation_only", "executable": False, "action": "none"},
@@ -759,7 +848,7 @@ async def _compute_prediction(
     model_rise_risk = _risk_from_rise(predicted_free_rise_mm, predicted_observed_rise_mm, profile, model_params)
     model_risk = _max_risk(model_threshold_risk, model_rise_risk)
 
-    policy_floor, policy_reason = _policy_floor(forecast_series, p_total, i_1h_max, model_params)
+    policy_floor, policy_reason = _policy_floor(p_total, i_1h_max, model_params)
     effective_risk = _max_risk(model_risk, policy_floor)
     should_notify = effective_risk in {"warning", "critical"}
 
@@ -801,6 +890,8 @@ async def _compute_prediction(
         "effective_risk": effective_risk,
         "policy_reason": policy_reason,
         "reading_stale": reading_stale,
+        "sensor_consistency_diagnosis": consistency_diagnosis,
+        "threshold_provenance": threshold_provenance,
         "validated_params": {
             "lambda_decay": model_params.get("lambda_decay"),
             "pump_on_rise_mm": model_params.get("pump_on_rise_mm"),

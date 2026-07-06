@@ -81,14 +81,14 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
         session.add(station)
         return station
 
-    async def _seed_sensor(self, session, *, baseline=Decimal("100"), latest=Decimal("100")):
+    async def _seed_sensor(self, session, *, baseline=Decimal("100"), latest=Decimal("100"), warning=Decimal("95"), danger=Decimal("90")):
         now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
         sensor = Sensor(
             sensor_id="ultrasonic_002",
             sensor_type="ultrasonic",
             location="D楼",
-            warning_level=Decimal("95"),
-            danger_level=Decimal("90"),
+            warning_level=warning,
+            danger_level=danger,
             threshold_condition="less_or_equal",
             water_level_baseline=baseline,
             normal_interval=300,
@@ -325,6 +325,62 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             # q2 is ~62.3 mm/h (6.23 cm/h). It must not be a per-pump capacity scaled by count.
             for output in pump_outputs:
                 self.assertAlmostEqual(output, 62.3, places=0)
+
+    async def test_sensor_consistency_diagnosis_is_shadow_mode_only(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session)
+            # Add a companion sensor 003 reading so consistency diagnosis can run.
+            now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            sensor_003 = Sensor(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                location="D楼3号",
+                warning_level=Decimal("70.6"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                water_level_baseline=Decimal("80"),
+                normal_interval=300,
+                is_active=True,
+            )
+            reading_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal("85.0"),
+                status="normal",
+                recorded_at=now_hour,
+            )
+            session.add_all([sensor_003, reading_003])
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            features = result.features or {}
+            diagnosis = features.get("sensor_consistency_diagnosis")
+            self.assertIsNotNone(diagnosis)
+            self.assertTrue(diagnosis.get("diagnostic_only"))
+            # Must not affect risk conclusion.
+            self.assertEqual(result.risk_level, "normal")
+
+    async def test_provisional_vertical_thresholds_are_recorded(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session, baseline=Decimal("100"), latest=Decimal("100"), warning=Decimal("81.2"), danger=Decimal("70.6"))
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            features = result.features or {}
+            provenance = features.get("threshold_provenance")
+            self.assertIsNotNone(provenance)
+            self.assertTrue(provenance.get("provisional_vertical_assumption"))
+            self.assertIn("not final PLC setpoints", provenance.get("reason", ""))
 
 
 if __name__ == "__main__":
