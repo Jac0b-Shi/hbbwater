@@ -1,66 +1,473 @@
-.git
-.gitattributes
+# Project-specific: temporary CSV exports and scratch files
+no-commit-*.csv
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
 
-# IDE
-.idea/
-.vscode/
-*.iml
-
-# Local environment
+# Project-specific: local environment and secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Project-specific: DM (Dream Database) vendor files and binaries
+backend/dm8_*.iso
+backend/vendor/dm/
 deploy/dm/dm_svc.conf
+backend/达梦*/
 
-# Python
-__pycache__/
-*.py[cod]
-*.so
-backend/venv/
-venv/
-env/
-*.egg-info/
-.pytest_cache/
+# Project-specific: IDE / agent / tool runtime directories
+.aiassistant/
+.claude/
+.playwright-mcp/
+.ssh/
+.workbuddy/
 
-# Node
-frontend/node_modules/
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Build output
-frontend/dist/
-dist/
-build/
-
-# Logs
+# Project-specific: logs and runtime data
 logs/
 *.log
 
-# Local tooling/cache
-.playwright-mcp/
-.aiassistant/
-.claude/
-.workbuddy/
-backend/vendor/dm/*
-!backend/vendor/dm/README.md
-backend/dm8_*.iso
-backend/达梦 Python 接口源码-*/
-backend/达梦 PHP_PDO 接口源码-*/
+# =============================================================================
+# Python (from github/gitignore main/Python.gitignore)
+# =============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
 
-# Temporary captures and notes in project root
-/*.png
-/network-requests.txt
+# C extensions
+*.so
 
-# Local reference scripts
-tools/webhook_proxy.py
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# OS files
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+*.lcov
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+# .python-version
+
+# pipenv
+# Pipfile.lock
+
+# UV
+# uv.lock
+
+# poetry
+# poetry.lock
+# poetry.toml
+
+# pdm
+# pdm.lock
+# pdm.toml
+.pdm-python
+.pdm-build/
+
+# pixi
+.pixi/*
+!.pixi/config.toml
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule*
+celerybeat.pid
+
+# Redis
+*.rdb
+*.aof
+*.pid
+
+# RabbitMQ
+mnesia/
+rabbitmq/
+rabbitmq-data/
+
+# ActiveMQ
+activemq-data/
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.venv
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Ruff
+.ruff_cache/
+
+# PyPI configuration
+.pypirc
+
+# Abstra
+.abstra/
+
+# Temporary file for partial code execution
+tempCodeRunnerFile.py
+
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# =============================================================================
+# Node (from github/gitignore main/Node.gitignore)
+# =============================================================================
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Directory for instrumented libs
+lib-cov
+
+# Coverage directory
+coverage
+*.lcov
+.nyc_output
+
+# Grunt intermediate storage
+.grunt
+
+# Bower dependency directory
+bower_components
+
+# node-waf configuration
+.lock-wscript
+
+# Compiled binary addons
+build/Release
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# parcel-bundler cache
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+out
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+.output
+
+# Gatsby files
+.cache/
+
+# vuepress build output
+.vuepress/dist
+
+# vuepress v2.x temp directory
+.temp
+
+# Sveltekit cache directory
+.svelte-kit/
+
+# vitepress build output
+**/.vitepress/dist
+
+# vitepress cache directory
+**/.vitepress/cache
+
+# Docusaurus cache and generated files
+.docusaurus
+
+# Serverless directories
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# Firebase cache directory
+.firebase/
+
+# TernJS port file
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+
+# pnpm
+.pnpm-store
+
+# yarn v3
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Vite files
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+.vite/
+
+# =============================================================================
+# Global OS / Editor (from github/gitignore main/Global/)
+# =============================================================================
+# macOS
 .DS_Store
-Thumbs.db
-*syncthing*
+.localized
+__MACOSX/
+.AppleDouble
+.LSOverride
+Icon[
+]
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.com.apple.timemachine.supported
+.PKInstallSandboxManager
+.PKInstallSandboxManager-SystemSoftware
+.hotfiles.btree
+.vol
+.file
+.disk_label*
+lost+found
+.HFS+ Private Directory Data[
+]
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+Desktop DB
+Desktop DF
+TheFindByContentFolder
+TheVolumeSettingsFolder
+.FBCIndex
+.FBCSemaphoreFile
+.FBCLockFolder
+.quota.group
+.quota.user
+.quota.ops.group
+.quota.ops.user
+Backups.backupdb
+.MobileBackups
+.MobileBackups.trash
+MobileBackups.trash
+tmbootpicker.efi
 
-# SSH files
-.ssh/
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+nohup.out
+
+# JetBrains IDEs
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/dictionaries
+.idea/**/shelf
+.idea/**/aws.xml
+.idea/**/contentModel.xml
+.idea/**/dataSources/
+.idea/**/dataSources.ids
+.idea/**/dataSources.local.xml
+.idea/**/sqlDataSources.xml
+.idea/**/dynamic.xml
+.idea/**/uiDesigner.xml
+.idea/**/dbnavigator.xml
+.idea/**/gradle.xml
+.idea/**/libraries
+.idea/**/mongoSettings.xml
+.idea/replstate.xml
+.idea/sonarlint/
+.idea/sonarlint.xml
+.idea/httpRequests
+.idea/.cache/.Apifox_Helper
+.idea/ApifoxUploaderProjectSetting.xml
+.idea/**/caches/build_file_checksums.ser
+.idea/**/copilot.data.migration.*.xml
+*.iws
+out/
+.idea_modules/
+atlassian-ide-plugin.xml
+com_crashlytics_export_strings.xml
+crashlytics.properties
+crashlytics-build.properties
+fabric.properties
+http-client.private.env.json
+
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+!*.code-workspace
+*.vsix
+
+# =============================================================================
+# Project-specific: frontend build output
+# =============================================================================
+frontend/dist/
+frontend/.DS_Store
