@@ -243,7 +243,7 @@ class WebhookGroupDetail(WebhookGroupResponse):
 
 class AlertCreate(BaseModel):
     sensor_id: str
-    alert_type: str = Field(..., pattern="^(high_water|water_detected|sensor_offline|low_battery)$")
+    alert_type: str = Field(..., pattern="^(high_water|forecast_high_water|water_detected|sensor_offline|low_battery)$")
     severity: str = Field(default="medium", pattern="^(low|medium|high|critical)$")
     message: str
     details: Optional[Dict[str, Any]] = None
@@ -391,6 +391,105 @@ class RainfallActualRevisionResponse(BaseModel):
 
 class RainfallActualRevisionList(BaseModel):
     items: List[RainfallActualRevisionResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+# ==================== Forecast Alert Schemas ====================
+
+class ForecastAlertGlobalConfig(BaseModel):
+    enabled: bool = False
+    cooldown_minutes: int = Field(default=120, ge=5, le=1440)
+    default_horizon_hours: int = Field(default=6, ge=1, le=24)
+    model_params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ForecastAlertProfilePayload(BaseModel):
+    sensor_id: str = Field(..., max_length=50)
+    is_enabled: bool = False
+    station_id: Optional[str] = Field(None, max_length=50)
+    horizon_hours: int = Field(default=6, ge=1, le=24)
+    warning_rise_mm: Optional[Decimal] = Field(None, ge=0)
+    critical_rise_mm: Optional[Decimal] = Field(None, ge=0)
+    model_params: Optional[Dict[str, Any]] = None
+    pump_params: Optional[Dict[str, Any]] = None
+    actuator_binding_id: Optional[str] = Field(None, max_length=100)
+
+
+class ForecastAlertProfileResponse(ForecastAlertProfilePayload):
+    id: Optional[int] = None
+    sensor_location: Optional[str] = None
+    sensor_type: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ForecastAlertConfigResponse(BaseModel):
+    global_config: ForecastAlertGlobalConfig
+    profiles: List[ForecastAlertProfileResponse]
+    stations: List[RainfallStationResponse]
+
+
+class ForecastAlertConfigUpdate(BaseModel):
+    global_config: Optional[ForecastAlertGlobalConfig] = None
+    profiles: List[ForecastAlertProfilePayload] = Field(default_factory=list)
+
+
+class ForecastAlertEvaluateRequest(BaseModel):
+    dry_run: bool = True
+    sensor_ids: Optional[List[str]] = None
+    horizon_hours: Optional[int] = Field(None, ge=1, le=24)
+
+
+class ForecastPredictionResultResponse(BaseModel):
+    id: int
+    run_id: int
+    sensor_id: str
+    station_id: Optional[str]
+    risk_level: str
+    should_notify: bool
+    notification_sent: bool
+    alert_id: Optional[int]
+    horizon_hours: int
+    forecast_issued_at: Optional[datetime]
+    peak_time: Optional[datetime]
+    predicted_free_rise_mm: Optional[Decimal]
+    predicted_observed_rise_mm: Optional[Decimal]
+    projected_distance_cm: Optional[Decimal]
+    latest_distance_cm: Optional[Decimal]
+    confidence: Optional[Decimal]
+    features: Optional[Dict[str, Any]]
+    series: Optional[List[Dict[str, Any]]]
+    control_recommendation: Optional[Dict[str, Any]]
+    decision_reason: Optional[str]
+    model_version: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ForecastPredictionRunResponse(BaseModel):
+    id: int
+    trigger_type: str
+    dry_run: bool
+    status: str
+    message: Optional[str]
+    forecast_issued_at: Optional[datetime]
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_by: Optional[str]
+    source: Optional[Dict[str, Any]]
+    created_at: datetime
+    results: List[ForecastPredictionResultResponse] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
+class ForecastPredictionRunList(BaseModel):
+    items: List[ForecastPredictionRunResponse]
     total: int
     page: int
     page_size: int

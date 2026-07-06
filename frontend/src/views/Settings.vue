@@ -132,6 +132,154 @@
 
     <el-row :gutter="20" class="mt-4">
       <el-col :span="24">
+        <el-card shadow="hover" v-loading="forecastAlertStore.loading">
+          <template #header>
+            <div class="card-header-inline">
+              <span>预报型水位告警</span>
+              <el-tag :type="forecastGlobalConfig.enabled ? 'success' : 'info'">
+                {{ forecastGlobalConfig.enabled ? '已启用' : '未启用' }}
+              </el-tag>
+            </div>
+          </template>
+
+          <el-alert
+            title="当前版本只生成预测、告警和泵控建议，不会直接执行水泵启停。"
+            type="info"
+            show-icon
+            :closable="false"
+            class="mb-4"
+          />
+
+          <el-form :model="forecastGlobalConfig" :label-width="isMobile ? 'auto' : '150px'" :label-position="isMobile ? 'top' : 'right'">
+            <el-form-item label="启用预报告警">
+              <el-switch v-model="forecastGlobalConfig.enabled" />
+            </el-form-item>
+            <el-form-item label="默认预测窗口">
+              <el-input-number v-model="forecastGlobalConfig.default_horizon_hours" :min="1" :max="24" />
+              <span class="form-hint">小时</span>
+            </el-form-item>
+            <el-form-item label="冷却时间">
+              <el-input-number v-model="forecastGlobalConfig.cooldown_minutes" :min="5" :max="1440" />
+              <span class="form-hint">分钟</span>
+            </el-form-item>
+            <el-form-item label="模型参数 JSON">
+              <el-input
+                v-model="forecastModelParamsText"
+                type="textarea"
+                :autosize="{ minRows: 3, maxRows: 8 }"
+                placeholder='{"lambda_decay":0.97,"pump_on_rise_mm":50}'
+              />
+            </el-form-item>
+          </el-form>
+
+          <el-table v-if="!isMobile" :data="forecastProfiles" stripe style="width: 100%" class="forecast-profile-table">
+            <el-table-column label="启用" width="80">
+              <template #default="{ row }">
+                <el-switch v-model="row.is_enabled" />
+              </template>
+            </el-table-column>
+            <el-table-column label="传感器" min-width="180">
+              <template #default="{ row }">
+                <div class="station-cell">
+                  <strong>{{ row.sensor_id }}</strong>
+                  <span>{{ row.sensor_location || '未设置位置' }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="雨量站" min-width="180">
+              <template #default="{ row }">
+                <el-select v-model="row.station_id" placeholder="自动选择" clearable>
+                  <el-option
+                    v-for="station in forecastStations"
+                    :key="station.station_id"
+                    :label="`${station.station_name} - ${station.station_id}`"
+                    :value="station.station_id"
+                  />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="窗口(h)" width="120">
+              <template #default="{ row }">
+                <el-input-number v-model="row.horizon_hours" :min="1" :max="24" size="small" />
+              </template>
+            </el-table-column>
+            <el-table-column label="预警(mm)" width="130">
+              <template #default="{ row }">
+                <el-input-number v-model="row.warning_rise_mm" :min="0" :max="1000" size="small" />
+              </template>
+            </el-table-column>
+            <el-table-column label="危险(mm)" width="130">
+              <template #default="{ row }">
+                <el-input-number v-model="row.critical_rise_mm" :min="0" :max="1000" size="small" />
+              </template>
+            </el-table-column>
+            <el-table-column label="泵阈值(mm)" width="130">
+              <template #default="{ row }">
+                <el-input-number v-model="row.pump_on_rise_mm" :min="0" :max="1000" size="small" />
+              </template>
+            </el-table-column>
+            <el-table-column label="泵能力(mm/min)" width="150">
+              <template #default="{ row }">
+                <el-input-number v-model="row.pump_capacity_mm_per_min" :min="0" :max="10" :step="0.01" size="small" />
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div v-else class="forecast-profile-cards">
+            <article v-for="profile in forecastProfiles" :key="profile.sensor_id" class="forecast-profile-card">
+              <div class="forecast-profile-head">
+                <div>
+                  <strong>{{ profile.sensor_id }}</strong>
+                  <div>{{ profile.sensor_location || '未设置位置' }}</div>
+                </div>
+                <el-switch v-model="profile.is_enabled" />
+              </div>
+              <el-form :model="profile" label-position="top">
+                <el-form-item label="雨量站">
+                  <el-select v-model="profile.station_id" placeholder="自动选择" clearable>
+                    <el-option
+                      v-for="station in forecastStations"
+                      :key="station.station_id"
+                      :label="`${station.station_name} - ${station.station_id}`"
+                      :value="station.station_id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <div class="forecast-profile-grid">
+                  <el-form-item label="窗口(h)">
+                    <el-input-number v-model="profile.horizon_hours" :min="1" :max="24" />
+                  </el-form-item>
+                  <el-form-item label="预警(mm)">
+                    <el-input-number v-model="profile.warning_rise_mm" :min="0" :max="1000" />
+                  </el-form-item>
+                  <el-form-item label="危险(mm)">
+                    <el-input-number v-model="profile.critical_rise_mm" :min="0" :max="1000" />
+                  </el-form-item>
+                  <el-form-item label="泵能力">
+                    <el-input-number v-model="profile.pump_capacity_mm_per_min" :min="0" :max="10" :step="0.01" />
+                  </el-form-item>
+                </div>
+              </el-form>
+            </article>
+          </div>
+
+          <div class="forecast-actions-row">
+            <el-button type="primary" :loading="forecastAlertStore.saving" @click="saveForecastConfig">
+              保存预报配置
+            </el-button>
+            <el-button :loading="forecastAlertStore.evaluating" @click="runForecastDryRun">
+              Dry-run 评估
+            </el-button>
+            <span v-if="forecastAlertStore.latestRun" class="form-hint">
+              最近评估 {{ formatDateTime(forecastAlertStore.latestRun.created_at) }}
+            </span>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="20" class="mt-4">
+      <el-col :span="24">
         <el-card shadow="hover">
           <template #header>
             <div class="card-header-inline">
@@ -331,8 +479,10 @@ import axios from 'axios'
 import { APP_VERSION } from '../constants/appMeta'
 import { formatUtc8DateTime } from '../utils/time'
 import { useResponsive } from '../composables/useResponsive'
+import { useForecastAlertStore } from '../stores/forecastAlerts'
 
 const { isMobile } = useResponsive()
+const forecastAlertStore = useForecastAlertStore()
 
 const systemConfig = ref({
   data_retention_days: 14,
@@ -392,6 +542,14 @@ const businessStatsUnavailable = ref(false)
 
 const maintenanceLoading = ref(false)
 const optimizeLoading = ref(false)
+const forecastGlobalConfig = ref({
+  enabled: false,
+  cooldown_minutes: 120,
+  default_horizon_hours: 6,
+  model_params: {}
+})
+const forecastModelParamsText = ref('{}')
+const forecastProfiles = ref([])
 
 const defaultBusinessProfileForm = () => ({
   id: null,
@@ -455,6 +613,7 @@ const runtimeDatabaseTarget = computed(() => {
   }
   return businessDbState.value.runtime.database || '-'
 })
+const forecastStations = computed(() => forecastAlertStore.config?.stations || [])
 
 const getErrorMessage = (error) => {
   if (error.response?.data?.detail) return error.response.data.detail
@@ -545,6 +704,75 @@ const syncBusinessDatabaseState = (payload) => {
   }
 }
 
+const toNumberOrNull = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+const parseJsonObject = (value) => {
+  if (!value.trim()) return {}
+  const parsed = JSON.parse(value)
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new Error('JSON 必须是对象')
+  }
+  return parsed
+}
+
+const getPumpParam = (profile, key, fallback) => {
+  const value = profile.pump_params?.[key]
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+const applyForecastConfig = (payload) => {
+  if (!payload) return
+  forecastGlobalConfig.value = {
+    enabled: Boolean(payload.global_config?.enabled),
+    cooldown_minutes: Number(payload.global_config?.cooldown_minutes || 120),
+    default_horizon_hours: Number(payload.global_config?.default_horizon_hours || 6),
+    model_params: payload.global_config?.model_params || {}
+  }
+  forecastModelParamsText.value = JSON.stringify(forecastGlobalConfig.value.model_params || {}, null, 2)
+  forecastProfiles.value = (payload.profiles || []).map(profile => ({
+    ...profile,
+    is_enabled: Boolean(profile.is_enabled),
+    station_id: profile.station_id || '',
+    horizon_hours: Number(profile.horizon_hours || forecastGlobalConfig.value.default_horizon_hours || 6),
+    warning_rise_mm: toNumberOrNull(profile.warning_rise_mm),
+    critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
+    pump_on_rise_mm: getPumpParam(profile, 'pump_on_rise_mm', 50),
+    pump_capacity_mm_per_min: getPumpParam(profile, 'pump_capacity_mm_per_min', 1.05),
+  }))
+}
+
+const loadForecastConfig = async () => {
+  const config = await forecastAlertStore.fetchConfig()
+  applyForecastConfig(config)
+  await forecastAlertStore.fetchLatest().catch(() => {})
+}
+
+const buildForecastConfigPayload = () => ({
+  global_config: {
+    ...forecastGlobalConfig.value,
+    model_params: parseJsonObject(forecastModelParamsText.value),
+  },
+  profiles: forecastProfiles.value.map(profile => ({
+    sensor_id: profile.sensor_id,
+    is_enabled: Boolean(profile.is_enabled),
+    station_id: profile.station_id || null,
+    horizon_hours: Number(profile.horizon_hours || forecastGlobalConfig.value.default_horizon_hours || 6),
+    warning_rise_mm: toNumberOrNull(profile.warning_rise_mm),
+    critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
+    model_params: profile.model_params || null,
+    pump_params: {
+      pump_on_rise_mm: Number(profile.pump_on_rise_mm || 50),
+      pump_capacity_mm_per_min: Number(profile.pump_capacity_mm_per_min || 1.05),
+    },
+    actuator_binding_id: profile.actuator_binding_id || null,
+  }))
+})
+
 const buildBusinessProfilePayload = (extra = {}) => {
   const payload = {
     id: businessProfileForm.value.id,
@@ -572,11 +800,12 @@ const buildBusinessProfilePayload = (extra = {}) => {
 }
 
 const loadSettings = async () => {
-  const [systemRes, notifyRes, businessRes, statsRes] = await Promise.allSettled([
+  const [systemRes, notifyRes, businessRes, statsRes, forecastRes] = await Promise.allSettled([
     axios.get('/api/config/system'),
     axios.get('/api/config/notification'),
     axios.get('/api/config/business-database'),
-    axios.get('/api/config/database/stats')
+    axios.get('/api/config/database/stats'),
+    loadForecastConfig()
   ])
 
   if (systemRes.status !== 'fulfilled') throw systemRes.reason
@@ -586,6 +815,9 @@ const loadSettings = async () => {
   systemConfig.value = { ...systemConfig.value, ...systemRes.value.data }
   notifyConfig.value = { ...notifyConfig.value, ...notifyRes.value.data }
   syncBusinessDatabaseState(businessRes.value.data)
+  if (forecastRes.status !== 'fulfilled') {
+    forecastAlertStore.error = forecastRes.reason?.response?.data?.detail || forecastRes.reason?.message || '预报告警配置加载失败'
+  }
 
   if (statsRes.status === 'fulfilled') {
     dbStats.value = { ...dbStats.value, ...statsRes.value.data }
@@ -622,6 +854,25 @@ const saveNotifyConfig = async () => {
     ElMessage.error('保存失败: ' + getErrorMessage(error))
   } finally {
     savingNotifyConfig.value = false
+  }
+}
+
+const saveForecastConfig = async () => {
+  try {
+    const saved = await forecastAlertStore.saveConfig(buildForecastConfigPayload())
+    applyForecastConfig(saved)
+    ElMessage.success('预报告警配置已保存')
+  } catch (error) {
+    ElMessage.error('保存失败: ' + getErrorMessage(error))
+  }
+}
+
+const runForecastDryRun = async () => {
+  try {
+    await forecastAlertStore.evaluate({ dry_run: true })
+    ElMessage.success('Dry-run 评估完成')
+  } catch (error) {
+    ElMessage.error('评估失败: ' + getErrorMessage(error))
   }
 }
 
@@ -856,6 +1107,69 @@ onMounted(async () => {
   max-width: 100%;
 }
 
+.forecast-profile-table {
+  margin-top: 12px;
+}
+
+.station-cell {
+  display: grid;
+  gap: 3px;
+}
+
+.station-cell strong {
+  color: #303133;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.station-cell span {
+  color: #909399;
+  font-size: 12px;
+}
+
+.forecast-actions-row {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.forecast-profile-cards {
+  display: grid;
+  gap: 12px;
+}
+
+.forecast-profile-card {
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.forecast-profile-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.forecast-profile-head strong {
+  color: #303133;
+  font-size: 14px;
+}
+
+.forecast-profile-head div div {
+  margin-top: 4px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.forecast-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .db-actions {
   margin-top: 20px;
   display: flex;
@@ -873,6 +1187,20 @@ onMounted(async () => {
 
   .db-actions {
     flex-direction: column;
+  }
+
+  .forecast-actions-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .forecast-actions-row :deep(.el-button) {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .forecast-profile-grid {
+    grid-template-columns: 1fr;
   }
 
   .settings-page :deep(.el-col + .el-col) {

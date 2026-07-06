@@ -52,6 +52,7 @@ class Severity(str, enum.Enum):
 
 class AlertType(str, enum.Enum):
     HIGH_WATER = "high_water"
+    FORECAST_HIGH_WATER = "forecast_high_water"
     WATER_DETECTED = "water_detected"
     SENSOR_OFFLINE = "sensor_offline"
     LOW_BATTERY = "low_battery"
@@ -110,6 +111,12 @@ class Sensor(BusinessBase):
     webhook_group = relationship("WebhookGroup", back_populates="sensors")
     readings = relationship("SensorReading", back_populates="sensor", cascade="all, delete-orphan")
     alerts = relationship("Alert", back_populates="sensor", cascade="all, delete-orphan")
+    forecast_alert_profile = relationship(
+        "ForecastAlertProfile",
+        back_populates="sensor",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     @property
     def webhook_group_name(self) -> Optional[str]:
@@ -139,7 +146,7 @@ class WebhookGroup(BusinessBase):
 class SensorReading(BusinessBase):
     __tablename__ = "sensor_readings"
     
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     sensor_id = Column(String(50), ForeignKey("sensors.sensor_id", ondelete="CASCADE"), nullable=False)
     sensor_type = Column(String(20), nullable=False)
     # Ultrasonic fields
@@ -174,7 +181,7 @@ class SensorReading(BusinessBase):
 class Alert(BusinessBase):
     __tablename__ = "alerts"
     
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     sensor_id = Column(String(50), ForeignKey("sensors.sensor_id", ondelete="CASCADE"), nullable=False)
     alert_type = Column(String(20), nullable=False)
     severity = Column(String(20), default="medium")
@@ -310,6 +317,90 @@ class RainfallActualRevision(BusinessBase):
     __table_args__ = (
         Index("idx_rainfall_revision_station_hour", "station_id", "hour_time"),
         Index("idx_rainfall_revision_detected", "detected_at"),
+    )
+
+
+class ForecastAlertProfile(BusinessBase):
+    __tablename__ = "forecast_alert_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sensor_id = Column(String(50), ForeignKey("sensors.sensor_id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    is_enabled = Column(Boolean, default=False)
+    station_id = Column(String(50), nullable=True, index=True)
+    horizon_hours = Column(Integer, default=6)
+    warning_rise_mm = Column(DECIMAL(10, 2), nullable=True)
+    critical_rise_mm = Column(DECIMAL(10, 2), nullable=True)
+    model_params = Column(JSONText)
+    pump_params = Column(JSONText)
+    actuator_binding_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    sensor = relationship("Sensor", back_populates="forecast_alert_profile")
+
+    __table_args__ = (
+        Index("idx_forecast_profile_enabled", "is_enabled"),
+        Index("idx_forecast_profile_station", "station_id"),
+    )
+
+
+class ForecastPredictionRun(BusinessBase):
+    __tablename__ = "forecast_prediction_runs"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    trigger_type = Column(String(20), nullable=False, default="manual")
+    dry_run = Column(Boolean, default=True)
+    status = Column(String(20), nullable=False, default="completed")
+    message = Column(Text)
+    forecast_issued_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    created_by = Column(String(50), nullable=True)
+    source = Column(JSONText)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    results = relationship("ForecastPredictionResult", back_populates="run", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_forecast_run_started", "started_at"),
+        Index("idx_forecast_run_status", "status"),
+        Index("idx_forecast_run_dry_run", "dry_run"),
+    )
+
+
+class ForecastPredictionResult(BusinessBase):
+    __tablename__ = "forecast_prediction_results"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    run_id = Column(BigInteger().with_variant(Integer, "sqlite"), ForeignKey("forecast_prediction_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    sensor_id = Column(String(50), ForeignKey("sensors.sensor_id", ondelete="CASCADE"), nullable=False, index=True)
+    station_id = Column(String(50), nullable=True, index=True)
+    risk_level = Column(String(20), nullable=False, default="normal")
+    should_notify = Column(Boolean, default=False)
+    notification_sent = Column(Boolean, default=False)
+    alert_id = Column(BigInteger().with_variant(Integer, "sqlite"), ForeignKey("alerts.id", ondelete="SET NULL"), nullable=True, index=True)
+    horizon_hours = Column(Integer, default=6)
+    forecast_issued_at = Column(DateTime, nullable=True)
+    peak_time = Column(DateTime, nullable=True)
+    predicted_free_rise_mm = Column(DECIMAL(10, 2), nullable=True)
+    predicted_observed_rise_mm = Column(DECIMAL(10, 2), nullable=True)
+    projected_distance_cm = Column(DECIMAL(10, 2), nullable=True)
+    latest_distance_cm = Column(DECIMAL(10, 2), nullable=True)
+    confidence = Column(DECIMAL(5, 2), nullable=True)
+    features = Column(JSONText)
+    series = Column(JSONText)
+    control_recommendation = Column(JSONText)
+    decision_reason = Column(Text)
+    model_version = Column(String(64), nullable=False, default="segmented_pressure_v1")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    run = relationship("ForecastPredictionRun", back_populates="results")
+    sensor = relationship("Sensor")
+    alert = relationship("Alert")
+
+    __table_args__ = (
+        Index("idx_forecast_result_sensor_created", "sensor_id", "created_at"),
+        Index("idx_forecast_result_risk", "risk_level"),
     )
 
 

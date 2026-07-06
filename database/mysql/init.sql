@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS sensor_summary_daily (
 CREATE TABLE IF NOT EXISTS alerts (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     sensor_id VARCHAR(50) NOT NULL,
-    alert_type ENUM('high_water', 'water_detected', 'sensor_offline', 'low_battery') NOT NULL,
+    alert_type ENUM('high_water', 'forecast_high_water', 'water_detected', 'sensor_offline', 'low_battery') NOT NULL,
     severity ENUM('low', 'medium', 'high', 'critical') NOT NULL DEFAULT 'medium',
     message TEXT NOT NULL,
     details JSON COMMENT '详细信息',
@@ -243,6 +243,71 @@ CREATE TABLE IF NOT EXISTS alerts (
     INDEX idx_created (created_at),
     INDEX idx_resolved (is_resolved)
 ) ENGINE=InnoDB COMMENT='告警记录表';
+
+CREATE TABLE IF NOT EXISTS forecast_alert_profiles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    sensor_id VARCHAR(50) NOT NULL UNIQUE COMMENT '超声波传感器ID',
+    is_enabled BOOLEAN DEFAULT FALSE COMMENT '是否启用预报告警',
+    station_id VARCHAR(50) DEFAULT NULL COMMENT '指定雨量站，为空则使用系统选择',
+    horizon_hours INT DEFAULT 6 COMMENT '预测窗口小时数',
+    warning_rise_mm DECIMAL(10,2) DEFAULT NULL COMMENT '上涨量预警覆盖阈值(mm)',
+    critical_rise_mm DECIMAL(10,2) DEFAULT NULL COMMENT '上涨量危险覆盖阈值(mm)',
+    model_params JSON COMMENT '模型参数覆盖',
+    pump_params JSON COMMENT '泵参数覆盖',
+    actuator_binding_id VARCHAR(100) DEFAULT NULL COMMENT '未来泵控执行绑定ID',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_forecast_profile_enabled (is_enabled),
+    INDEX idx_forecast_profile_station (station_id)
+) ENGINE=InnoDB COMMENT='预报型告警传感器配置表';
+
+CREATE TABLE IF NOT EXISTS forecast_prediction_runs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    trigger_type VARCHAR(20) NOT NULL DEFAULT 'manual' COMMENT 'manual/scheduled/rainfall_collector',
+    dry_run BOOLEAN DEFAULT TRUE COMMENT '是否仅演练',
+    status VARCHAR(20) NOT NULL DEFAULT 'completed' COMMENT '评估状态',
+    message TEXT COMMENT '评估摘要或错误信息',
+    forecast_issued_at TIMESTAMP NULL DEFAULT NULL COMMENT '使用的预报批次时间',
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '评估开始时间',
+    completed_at TIMESTAMP NULL DEFAULT NULL COMMENT '评估完成时间',
+    created_by VARCHAR(50) DEFAULT NULL COMMENT '触发人',
+    source JSON COMMENT '评估来源信息',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_forecast_run_started (started_at),
+    INDEX idx_forecast_run_status (status),
+    INDEX idx_forecast_run_dry_run (dry_run)
+) ENGINE=InnoDB COMMENT='预报型水位预测评估批次表';
+
+CREATE TABLE IF NOT EXISTS forecast_prediction_results (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    run_id BIGINT NOT NULL COMMENT '评估批次ID',
+    sensor_id VARCHAR(50) NOT NULL COMMENT '传感器ID',
+    station_id VARCHAR(50) DEFAULT NULL COMMENT '雨量站ID',
+    risk_level VARCHAR(20) NOT NULL DEFAULT 'normal' COMMENT 'normal/watch/warning/critical',
+    should_notify BOOLEAN DEFAULT FALSE COMMENT '是否需要通知',
+    notification_sent BOOLEAN DEFAULT FALSE COMMENT '是否已触发通知',
+    alert_id BIGINT DEFAULT NULL COMMENT '关联告警ID',
+    horizon_hours INT DEFAULT 6 COMMENT '预测窗口小时数',
+    forecast_issued_at TIMESTAMP NULL DEFAULT NULL COMMENT '预报批次时间',
+    peak_time TIMESTAMP NULL DEFAULT NULL COMMENT '预计峰值时间',
+    predicted_free_rise_mm DECIMAL(10,2) DEFAULT NULL COMMENT '无泵等效上涨(mm)',
+    predicted_observed_rise_mm DECIMAL(10,2) DEFAULT NULL COMMENT '考虑泵削峰后上涨(mm)',
+    projected_distance_cm DECIMAL(10,2) DEFAULT NULL COMMENT '预计最低测距(cm)',
+    latest_distance_cm DECIMAL(10,2) DEFAULT NULL COMMENT '最新测距(cm)',
+    confidence DECIMAL(5,2) DEFAULT NULL COMMENT '置信度',
+    features JSON COMMENT '模型输入特征',
+    series JSON COMMENT '滚动预测序列',
+    control_recommendation JSON COMMENT '泵控建议，仅建议不执行',
+    decision_reason TEXT COMMENT '决策原因',
+    model_version VARCHAR(64) NOT NULL DEFAULT 'segmented_pressure_v1',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_forecast_result_run (run_id),
+    INDEX idx_forecast_result_sensor (sensor_id),
+    INDEX idx_forecast_result_station (station_id),
+    INDEX idx_forecast_result_alert (alert_id),
+    INDEX idx_forecast_result_sensor_created (sensor_id, created_at),
+    INDEX idx_forecast_result_risk (risk_level)
+) ENGINE=InnoDB COMMENT='预报型水位预测结果表';
 
 CREATE TABLE IF NOT EXISTS system_config (
     id INT AUTO_INCREMENT PRIMARY KEY,

@@ -6,6 +6,9 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.models import (
+    ForecastAlertProfile,
+    ForecastPredictionResult,
+    ForecastPredictionRun,
     RainfallActualHourly,
     RainfallActualRevision,
     RainfallForecastHourly,
@@ -225,6 +228,34 @@ async def _ensure_weather_tables(conn: AsyncConnection) -> None:
         await conn.run_sync(lambda sync_conn: RainfallActualRevision.__table__.create(sync_conn, checkfirst=True))
 
 
+async def _ensure_forecast_alert_tables(conn: AsyncConnection) -> None:
+    if not await _table_exists(conn, "forecast_alert_profiles"):
+        await conn.run_sync(lambda sync_conn: ForecastAlertProfile.__table__.create(sync_conn, checkfirst=True))
+    if not await _table_exists(conn, "forecast_prediction_runs"):
+        await conn.run_sync(lambda sync_conn: ForecastPredictionRun.__table__.create(sync_conn, checkfirst=True))
+    if not await _table_exists(conn, "forecast_prediction_results"):
+        await conn.run_sync(lambda sync_conn: ForecastPredictionResult.__table__.create(sync_conn, checkfirst=True))
+
+
+async def _ensure_mysql_forecast_alert_enum(conn: AsyncConnection) -> None:
+    if conn.dialect.name != "mysql" or not await _table_exists(conn, "alerts"):
+        return
+    await conn.execute(
+        text(
+            """
+            ALTER TABLE alerts
+            MODIFY alert_type ENUM(
+                'high_water',
+                'forecast_high_water',
+                'water_detected',
+                'sensor_offline',
+                'low_battery'
+            ) NOT NULL
+            """
+        )
+    )
+
+
 async def _backfill_split_rainfall_tables(conn: AsyncConnection) -> None:
     if not await _table_exists(conn, "rainfall_hourly"):
         return
@@ -393,6 +424,9 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
             "rainfall_actual_hourly",
             "rainfall_forecast_hourly",
             "rainfall_actual_revisions",
+            "forecast_alert_profiles",
+            "forecast_prediction_runs",
+            "forecast_prediction_results",
         }
         missing_tables = sorted(required_tables - existing_tables)
         if missing_tables:
@@ -403,7 +437,9 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
             )
     else:
         await _ensure_weather_tables(conn)
+        await _ensure_forecast_alert_tables(conn)
 
+    await _ensure_mysql_forecast_alert_enum(conn)
     await _backfill_split_rainfall_tables(conn)
     await _ensure_default_weather_stations(conn)
 

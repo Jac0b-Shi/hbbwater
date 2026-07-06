@@ -57,16 +57,40 @@ def build_webhook_payload(
         }
 
     if alert is not None:
+        details = _normalize_value(alert.details)
         payload["alert"] = {
             "id": alert.id,
             "sensor_id": alert.sensor_id,
             "alert_type": alert.alert_type,
             "severity": alert.severity,
             "message": alert.message,
-            "details": _normalize_value(alert.details),
+            "details": details,
             "is_resolved": alert.is_resolved,
             "created_at": _normalize_value(alert.created_at),
         }
+        if alert.alert_type == "forecast_high_water" and isinstance(details, dict):
+            payload["prediction"] = {
+                key: details.get(key)
+                for key in (
+                    "prediction_result_id",
+                    "prediction_run_id",
+                    "station_id",
+                    "risk_level",
+                    "horizon_hours",
+                    "forecast_issued_at",
+                    "peak_time",
+                    "predicted_free_rise_mm",
+                    "predicted_observed_rise_mm",
+                    "projected_distance_cm",
+                    "latest_distance_cm",
+                    "confidence",
+                    "features",
+                    "control_recommendation",
+                    "model_version",
+                    "decision_reason",
+                )
+                if key in details
+            }
 
     if reading is not None:
         payload["reading"] = {
@@ -131,13 +155,34 @@ def _format_wecom_text(payload: dict[str, Any]) -> str:
 
     alert = payload.get("alert")
     if isinstance(alert, dict):
+        alert_type_map = {
+            "high_water": "高水位",
+            "forecast_high_water": "预报高水位",
+            "water_detected": "浸水检测",
+            "sensor_offline": "传感器离线",
+            "low_battery": "低电量",
+        }
         lines.extend(
             [
                 "",
                 "告警信息",
                 f"级别: {alert.get('severity', '-')}",
-                f"类型: {alert.get('alert_type', '-')}",
+                f"类型: {alert_type_map.get(alert.get('alert_type'), alert.get('alert_type', '-'))}",
                 f"消息: {alert.get('message', '-')}",
+            ]
+        )
+
+    prediction = payload.get("prediction")
+    if isinstance(prediction, dict):
+        lines.extend(
+            [
+                "",
+                "预报信息",
+                f"雨量站: {prediction.get('station_id', '-')}",
+                f"预计峰值: {prediction.get('peak_time', '-')}",
+                f"无泵上涨: {prediction.get('predicted_free_rise_mm', '-')} mm",
+                f"泵后上涨: {prediction.get('predicted_observed_rise_mm', '-')} mm",
+                f"预计测距: {prediction.get('projected_distance_cm', '-')} cm",
             ]
         )
 

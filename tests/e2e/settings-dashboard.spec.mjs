@@ -95,6 +95,63 @@ test.describe('settings and dashboard regressions', () => {
       })
     })
 
+    await page.route('**/api/forecast-alerts/config', async route => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({
+          json: {
+            global_config: {
+              enabled: false,
+              cooldown_minutes: 120,
+              default_horizon_hours: 6,
+              model_params: {}
+            },
+            profiles: [{
+              id: null,
+              sensor_id: 'ultrasonic_002',
+              sensor_location: 'D楼',
+              sensor_type: 'ultrasonic',
+              is_enabled: false,
+              station_id: null,
+              horizon_hours: 6,
+              warning_rise_mm: null,
+              critical_rise_mm: null,
+              model_params: null,
+              pump_params: null,
+              actuator_binding_id: null,
+              created_at: null,
+              updated_at: null
+            }],
+            stations: []
+          }
+        })
+        return
+      }
+      await route.fulfill({ json: { message: '预报配置已保存' } })
+    })
+
+    await page.route('**/api/forecast-alerts/latest', async route => {
+      await route.fulfill({ json: null })
+    })
+
+    await page.route('**/api/forecast-alerts/evaluate', async route => {
+      await route.fulfill({
+        json: {
+          id: 1,
+          trigger_type: 'manual',
+          dry_run: true,
+          status: 'completed',
+          message: '已评估 1 个传感器',
+          forecast_issued_at: null,
+          started_at: '2026-06-23T00:00:00',
+          completed_at: '2026-06-23T00:00:01',
+          created_by: 'admin',
+          source: {},
+          created_at: '2026-06-23T00:00:00',
+          results: []
+        }
+      })
+    })
+
     await page.route('**/api/config/notification/test-email', async route => {
       testEmailPayload = route.request().postDataJSON()
       await route.fulfill({

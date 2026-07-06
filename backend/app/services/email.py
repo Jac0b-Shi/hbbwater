@@ -205,6 +205,7 @@ async def send_alert_email(
     
     alert_type_map = {
         "high_water": "水位告警",
+        "forecast_high_water": "预报水位告警",
         "water_detected": "浸水告警",
         "sensor_offline": "设备离线",
         "low_battery": "电量告警",

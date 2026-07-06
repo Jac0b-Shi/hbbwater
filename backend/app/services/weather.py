@@ -816,6 +816,12 @@ async def rainfall_collector_loop() -> None:
                 f"[{datetime.utcnow()}] Rainfall collector stored "
                 f"{result.point_count} points for {result.station_count} stations."
             )
+            try:
+                from app.services.forecast_alerts import run_scheduled_forecast_evaluation
+
+                await run_scheduled_forecast_evaluation()
+            except Exception as exc:
+                print(f"[{datetime.utcnow()}] Forecast alert evaluation failed: {exc}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -15,7 +15,7 @@ from app.database import (
     dispose_databases,
     probe_business_database_path,
 )
-from app.routers import sensors, alerts, dashboard, config, account, auth, weather
+from app.routers import sensors, alerts, dashboard, config, account, auth, weather, forecast_alerts
 from app.services.account import account_service
 from app.services.business_profiles import ensure_business_profiles_bootstrap, profile_to_settings
 from app.services.health_watchdog import (
@@ -158,6 +158,7 @@ app.include_router(config.router, prefix="/api")
 app.include_router(account.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(weather.router, prefix="/api")
+app.include_router(forecast_alerts.router, prefix="/api")
 
 
 if __name__ == "__main__":

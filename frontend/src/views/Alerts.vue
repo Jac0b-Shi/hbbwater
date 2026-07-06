@@ -6,54 +6,59 @@
           <h2>告警管理</h2>
           <div class="header-actions">
             <el-tag v-if="!accountStore.canResolveAlerts" effect="plain" type="info">当前账号仅可查看</el-tag>
-            <el-radio-group v-model="filterStatus" size="small">
+            <el-radio-group v-if="accountStore.canResolveAlerts" v-model="alertMode" size="small">
+              <el-radio-button label="realtime">实时告警</el-radio-button>
+              <el-radio-button label="forecast">预报告警</el-radio-button>
+            </el-radio-group>
+            <el-radio-group v-if="alertMode === 'realtime'" v-model="filterStatus" size="small">
               <el-radio-button label="all">全部</el-radio-button>
               <el-radio-button label="active">未处理</el-radio-button>
               <el-radio-button label="resolved">已处理</el-radio-button>
             </el-radio-group>
-            <el-button type="primary" size="small" @click="refreshAlerts">
+            <el-button type="primary" size="small" @click="refreshCurrent">
               <el-icon><Refresh /></el-icon>刷新
             </el-button>
           </div>
         </div>
       </template>
 
-      <!-- Alert Stats -->
-      <el-row :gutter="20" class="stats-row">
-        <el-col :xs="12" :sm="6">
-          <div class="stat-box">
-            <div class="stat-number critical">{{ alertStore.criticalAlerts.length }}</div>
-            <div class="stat-label">紧急告警</div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6">
-          <div class="stat-box">
-            <div class="stat-number high">{{ alertStore.highAlerts.length }}</div>
-            <div class="stat-label">高优先级</div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6">
-          <div class="stat-box">
-            <div class="stat-number medium">{{ alertStore.activeAlerts.filter(a => a.severity === 'medium').length }}</div>
-            <div class="stat-label">中优先级</div>
-          </div>
-        </el-col>
-        <el-col :xs="12" :sm="6">
-          <div class="stat-box">
-            <div class="stat-number total">{{ alertStore.unresolvedCount }}</div>
-            <div class="stat-label">未处理总数</div>
-          </div>
-        </el-col>
-      </el-row>
+      <template v-if="alertMode === 'realtime'">
+        <!-- Alert Stats -->
+        <el-row :gutter="20" class="stats-row">
+          <el-col :xs="12" :sm="6">
+            <div class="stat-box">
+              <div class="stat-number critical">{{ alertStore.criticalAlerts.length }}</div>
+              <div class="stat-label">紧急告警</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="6">
+            <div class="stat-box">
+              <div class="stat-number high">{{ alertStore.highAlerts.length }}</div>
+              <div class="stat-label">高优先级</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="6">
+            <div class="stat-box">
+              <div class="stat-number medium">{{ alertStore.activeAlerts.filter(a => a.severity === 'medium').length }}</div>
+              <div class="stat-label">中优先级</div>
+            </div>
+          </el-col>
+          <el-col :xs="12" :sm="6">
+            <div class="stat-box">
+              <div class="stat-number total">{{ alertStore.unresolvedCount }}</div>
+              <div class="stat-label">未处理总数</div>
+            </div>
+          </el-col>
+        </el-row>
 
-      <!-- Alerts Table -->
-      <el-table
-        v-if="!isMobile"
-        v-loading="alertStore.loading"
-        :data="filteredAlerts"
-        stripe
-        style="width: 100%"
-      >
+        <!-- Alerts Table -->
+        <el-table
+          v-if="!isMobile"
+          v-loading="alertStore.loading"
+          :data="filteredAlerts"
+          stripe
+          style="width: 100%"
+        >
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="alert-detail">
@@ -103,9 +108,9 @@
             </span>
           </template>
         </el-table-column>
-      </el-table>
-      <div v-else v-loading="alertStore.loading" class="alert-card-list">
-        <article v-for="alert in filteredAlerts" :key="alert.id" class="alert-card" :class="`severity-${alert.severity}`">
+        </el-table>
+        <div v-else v-loading="alertStore.loading" class="alert-card-list">
+          <article v-for="alert in filteredAlerts" :key="alert.id" class="alert-card" :class="`severity-${alert.severity}`">
           <div class="alert-card-head">
             <div class="alert-card-tags">
               <el-tag :type="getSeverityType(alert.severity)">{{ getSeverityText(alert.severity) }}</el-tag>
@@ -134,9 +139,98 @@
           >
             处理告警
           </el-button>
-        </article>
-        <el-empty v-if="filteredAlerts.length === 0" description="暂无告警" />
-      </div>
+          </article>
+          <el-empty v-if="filteredAlerts.length === 0" description="暂无告警" />
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="forecast-toolbar">
+          <div class="forecast-run-summary">
+            <el-tag :type="forecastAlertStore.latestRun?.dry_run ? 'info' : 'success'">
+              {{ forecastAlertStore.latestRun?.dry_run ? '演练结果' : '正式评估' }}
+            </el-tag>
+            <span>{{ forecastAlertStore.latestRun ? `评估 ${formatTime(forecastAlertStore.latestRun.created_at)}` : '暂无预报评估结果' }}</span>
+          </div>
+          <div class="forecast-actions">
+            <el-button :loading="forecastAlertStore.evaluating" @click="runForecastDryRun">Dry-run 评估</el-button>
+            <el-button type="primary" :loading="forecastAlertStore.loading" @click="refreshForecast">
+              <el-icon><Refresh /></el-icon>刷新预报
+            </el-button>
+          </div>
+        </div>
+
+        <el-table
+          v-if="!isMobile"
+          v-loading="forecastAlertStore.loading || forecastAlertStore.evaluating"
+          :data="forecastResults"
+          stripe
+          style="width: 100%"
+        >
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="alert-detail">
+                <p><strong>预测详情:</strong></p>
+                <pre>{{ JSON.stringify(row, null, 2) }}</pre>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="risk_level" label="风险" width="100">
+            <template #default="{ row }">
+              <el-tag :type="getRiskType(row.risk_level)">{{ getRiskText(row.risk_level) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="sensor_id" label="传感器" width="150" />
+          <el-table-column prop="station_id" label="雨量站" width="110" />
+          <el-table-column label="未来窗口" width="100">
+            <template #default="{ row }">{{ row.horizon_hours }}h</template>
+          </el-table-column>
+          <el-table-column label="峰值时间" width="180">
+            <template #default="{ row }">{{ formatTime(row.peak_time) }}</template>
+          </el-table-column>
+          <el-table-column label="无泵上涨" width="120">
+            <template #default="{ row }">{{ formatMm(row.predicted_free_rise_mm) }}</template>
+          </el-table-column>
+          <el-table-column label="泵后上涨" width="120">
+            <template #default="{ row }">{{ formatMm(row.predicted_observed_rise_mm) }}</template>
+          </el-table-column>
+          <el-table-column label="预计测距" width="120">
+            <template #default="{ row }">{{ formatCm(row.projected_distance_cm) }}</template>
+          </el-table-column>
+          <el-table-column label="通知" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.notification_sent ? 'success' : (row.should_notify ? 'warning' : 'info')">
+                {{ row.notification_sent ? '已发送' : (row.should_notify ? '待通知' : '不通知') }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="置信度" width="100">
+            <template #default="{ row }">{{ formatPercent(row.confidence) }}</template>
+          </el-table-column>
+        </el-table>
+
+        <div v-else v-loading="forecastAlertStore.loading || forecastAlertStore.evaluating" class="alert-card-list">
+          <article v-for="result in forecastResults" :key="result.id" class="alert-card" :class="`severity-${forecastSeverity(result.risk_level)}`">
+            <div class="alert-card-head">
+              <div class="alert-card-tags">
+                <el-tag :type="getRiskType(result.risk_level)">{{ getRiskText(result.risk_level) }}</el-tag>
+                <el-tag effect="plain">{{ result.station_id || '无雨量站' }}</el-tag>
+              </div>
+              <el-tag size="small" :type="result.notification_sent ? 'success' : 'info'">
+                {{ result.notification_sent ? '已通知' : '未通知' }}
+              </el-tag>
+            </div>
+            <div class="alert-card-message">{{ result.decision_reason || '暂无预测说明' }}</div>
+            <dl class="alert-card-meta">
+              <div><dt>传感器</dt><dd>{{ result.sensor_id }}</dd></div>
+              <div><dt>峰值</dt><dd>{{ formatTime(result.peak_time) }}</dd></div>
+              <div><dt>无泵上涨</dt><dd>{{ formatMm(result.predicted_free_rise_mm) }}</dd></div>
+              <div><dt>预计测距</dt><dd>{{ formatCm(result.projected_distance_cm) }}</dd></div>
+            </dl>
+          </article>
+          <el-empty v-if="forecastResults.length === 0" description="暂无预报评估结果" />
+        </div>
+      </template>
     </el-card>
 
     <!-- Resolve Dialog -->
@@ -155,18 +249,21 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAccountStore } from '../stores/account'
 import { useAlertStore } from '../stores/alerts'
+import { useForecastAlertStore } from '../stores/forecastAlerts'
 import { formatUtc8DateTime } from '../utils/time'
 import { useResponsive } from '../composables/useResponsive'
 
 const accountStore = useAccountStore()
 const alertStore = useAlertStore()
+const forecastAlertStore = useForecastAlertStore()
 const { isMobile } = useResponsive()
 const dialogWidth = computed(() => isMobile.value ? 'calc(100vw - 24px)' : '400px')
 
+const alertMode = ref('realtime')
 const filterStatus = ref('active')
 const showResolveDialog = ref(false)
 const currentAlert = ref(null)
@@ -181,6 +278,7 @@ const filteredAlerts = computed(() => {
   }
   return alertStore.alerts
 })
+const forecastResults = computed(() => forecastAlertStore.latestResults)
 
 const getSeverityType = (severity) => {
   const map = { low: 'info', medium: 'warning', high: 'danger', critical: 'danger' }
@@ -195,6 +293,7 @@ const getSeverityText = (severity) => {
 const getAlertTypeText = (type) => {
   const map = {
     high_water: '高水位',
+    forecast_high_water: '预报高水位',
     water_detected: '浸水检测',
     sensor_offline: '传感器离线',
     low_battery: '低电量'
@@ -203,9 +302,54 @@ const getAlertTypeText = (type) => {
 }
 
 const formatTime = (time) => formatUtc8DateTime(time)
+const formatMm = (value) => value === null || value === undefined ? '-' : `${Number(value).toFixed(1)} mm`
+const formatCm = (value) => value === null || value === undefined ? '-' : `${Number(value).toFixed(2)} cm`
+const formatPercent = (value) => value === null || value === undefined ? '-' : `${Math.round(Number(value) * 100)}%`
+
+const getRiskType = (risk) => {
+  const map = { normal: 'success', watch: 'info', warning: 'warning', critical: 'danger' }
+  return map[risk] || 'info'
+}
+
+const getRiskText = (risk) => {
+  const map = { normal: '正常', watch: '关注', warning: '预警', critical: '危险' }
+  return map[risk] || risk
+}
+
+const forecastSeverity = (risk) => {
+  if (risk === 'critical') return 'critical'
+  if (risk === 'warning') return 'high'
+  return 'medium'
+}
 
 const refreshAlerts = () => {
   alertStore.fetchAlerts()
+}
+
+const refreshForecast = async () => {
+  if (!accountStore.canResolveAlerts) return
+  try {
+    await forecastAlertStore.fetchLatest()
+  } catch (error) {
+    ElMessage.error('加载预报评估失败: ' + (error.response?.data?.detail || error.message))
+  }
+}
+
+const refreshCurrent = () => {
+  if (alertMode.value === 'forecast') {
+    refreshForecast()
+    return
+  }
+  refreshAlerts()
+}
+
+const runForecastDryRun = async () => {
+  try {
+    await forecastAlertStore.evaluate({ dry_run: true })
+    ElMessage.success('Dry-run 评估完成')
+  } catch (error) {
+    ElMessage.error('评估失败: ' + (error.response?.data?.detail || error.message))
+  }
 }
 
 const resolveAlert = (alert) => {
@@ -233,7 +377,16 @@ onMounted(() => {
   alertStore.fetchAlerts()
   refreshTimer = setInterval(() => {
     alertStore.fetchAlerts()
+    if (alertMode.value === 'forecast' && accountStore.canResolveAlerts) {
+      forecastAlertStore.fetchLatest().catch(() => {})
+    }
   }, 10000)
+})
+
+watch(alertMode, (mode) => {
+  if (mode === 'forecast') {
+    refreshForecast()
+  }
 })
 
 onUnmounted(() => {
@@ -263,6 +416,25 @@ onUnmounted(() => {
 
 .stats-row {
   margin-bottom: 20px;
+}
+
+.forecast-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.forecast-run-summary,
+.forecast-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .stat-box {
@@ -411,6 +583,18 @@ onUnmounted(() => {
   .header-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .forecast-toolbar,
+  .forecast-run-summary,
+  .forecast-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .forecast-actions :deep(.el-button) {
+    width: 100%;
+    margin-left: 0;
   }
 
   .header-actions :deep(.el-radio-group) {

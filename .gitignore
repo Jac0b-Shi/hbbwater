@@ -421,6 +421,7 @@ $RECYCLE.BIN/
 nohup.out
 
 # JetBrains IDEs
+.idea/
 .idea/**/workspace.xml
 .idea/**/tasks.xml
 .idea/**/usage.statistics.xml

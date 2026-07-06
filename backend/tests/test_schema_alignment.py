@@ -20,6 +20,8 @@ try:
 
     from app.database import BusinessBase
     from app.models import (
+        ForecastAlertProfile,
+        ForecastPredictionRun,
         RainfallActualHourly,
         RainfallForecastHourly,
         RainfallHourly,
@@ -120,6 +122,21 @@ class SchemaAlignmentTests(unittest.IsolatedAsyncioTestCase):
             session.add(rainfall)
             await session.commit()
             self.assertIsNotNone(rainfall.id)
+
+            forecast_profile = ForecastAlertProfile(
+                sensor_id="grouped_sensor",
+                is_enabled=True,
+                horizon_hours=6,
+            )
+            forecast_run = ForecastPredictionRun(
+                trigger_type="manual",
+                dry_run=True,
+                status="completed",
+            )
+            session.add_all([forecast_profile, forecast_run])
+            await session.commit()
+            self.assertIsNotNone(forecast_profile.id)
+            self.assertIsNotNone(forecast_run.id)
 
             actual = RainfallActualHourly(
                 station_id="A5151",
