@@ -43,7 +43,16 @@ CREATE TABLE forecast_prediction_results (
     run_id BIGINT NOT NULL,
     sensor_id VARCHAR(50) NOT NULL,
     station_id VARCHAR(50),
+    actual_station_id VARCHAR(50),
+    forecast_station_id VARCHAR(50),
+    rain_source_degraded SMALLINT DEFAULT 0,
+    degraded_reason VARCHAR(100),
+    data_status VARCHAR(20) DEFAULT 'available' NOT NULL,
     risk_level VARCHAR(20) DEFAULT 'normal' NOT NULL,
+    model_risk VARCHAR(20),
+    policy_floor VARCHAR(20),
+    effective_risk VARCHAR(20),
+    policy_reason VARCHAR(100),
     should_notify SMALLINT DEFAULT 0,
     notification_sent SMALLINT DEFAULT 0,
     alert_id BIGINT,
@@ -59,13 +68,16 @@ CREATE TABLE forecast_prediction_results (
     series CLOB,
     control_recommendation CLOB,
     decision_reason CLOB,
-    model_version VARCHAR(64) DEFAULT 'segmented_pressure_v1' NOT NULL,
+    model_version VARCHAR(64) DEFAULT 'heuristic_pressure_v1' NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_forecast_result_run ON forecast_prediction_results (run_id);
 CREATE INDEX idx_forecast_result_sensor ON forecast_prediction_results (sensor_id);
 CREATE INDEX idx_forecast_result_station ON forecast_prediction_results (station_id);
+CREATE INDEX idx_forecast_result_actual_station ON forecast_prediction_results (actual_station_id);
+CREATE INDEX idx_forecast_result_forecast_station ON forecast_prediction_results (forecast_station_id);
 CREATE INDEX idx_forecast_result_alert ON forecast_prediction_results (alert_id);
 CREATE INDEX idx_forecast_result_sensor_created ON forecast_prediction_results (sensor_id, created_at);
 CREATE INDEX idx_forecast_result_risk ON forecast_prediction_results (risk_level);
+CREATE INDEX idx_forecast_result_data_status ON forecast_prediction_results (data_status);

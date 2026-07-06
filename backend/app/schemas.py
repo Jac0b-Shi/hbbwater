@@ -404,6 +404,45 @@ class ForecastAlertGlobalConfig(BaseModel):
     default_horizon_hours: int = Field(default=6, ge=1, le=24)
     model_params: Dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("model_params")
+    @classmethod
+    def validate_model_params(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        if not v:
+            return v
+        # Reject legacy single-pump-capacity keys
+        if "pump_capacity_mm_per_min" in v or "pump_capacity_mm_per_hour" in v:
+            raise ValueError("legacy pump_capacity keys are not allowed; use net_drawdown_by_pump_count_cm_per_h")
+
+        # Validate drawdown table
+        drawdown = v.get("net_drawdown_by_pump_count_cm_per_h")
+        if drawdown is not None:
+            for key in ("0", "1", "2", "3"):
+                if key not in drawdown:
+                    raise ValueError(f"net_drawdown_by_pump_count_cm_per_h must include pump count {key}")
+                value = drawdown[key]
+                if value is not None and value < 0:
+                    raise ValueError(f"drawdown for pump count {key} must be non-negative or null")
+
+        # Validate lambda_decay
+        if "lambda_decay" in v:
+            ld = v["lambda_decay"]
+            if not isinstance(ld, (int, float)) or not (0.0 <= ld <= 1.0):
+                raise ValueError("lambda_decay must be between 0 and 1")
+
+        # Validate rise thresholds
+        for key in ("watch_rise_mm", "warning_rise_mm", "critical_rise_mm"):
+            if key in v:
+                value = v[key]
+                if not isinstance(value, (int, float)) or value < 0:
+                    raise ValueError(f"{key} must be a non-negative number")
+
+        watch = v.get("watch_rise_mm", 80.0)
+        warning = v.get("warning_rise_mm", 120.0)
+        critical = v.get("critical_rise_mm", 250.0)
+        if not (watch < warning < critical):
+            raise ValueError("watch_rise_mm < warning_rise_mm < critical_rise_mm is required")
+        return v
+
 
 class ForecastAlertProfilePayload(BaseModel):
     sensor_id: str = Field(..., max_length=50)
@@ -447,7 +486,16 @@ class ForecastPredictionResultResponse(BaseModel):
     run_id: int
     sensor_id: str
     station_id: Optional[str]
+    actual_station_id: Optional[str]
+    forecast_station_id: Optional[str]
+    rain_source_degraded: bool = False
+    degraded_reason: Optional[str]
+    data_status: str = "unavailable"
     risk_level: str
+    model_risk: Optional[str]
+    policy_floor: Optional[str]
+    effective_risk: Optional[str]
+    policy_reason: Optional[str]
     should_notify: bool
     notification_sent: bool
     alert_id: Optional[int]

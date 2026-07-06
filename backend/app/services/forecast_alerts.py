@@ -43,12 +43,24 @@ FORECAST_ALERT_ENABLED_KEY = "forecast_alert_enabled"
 FORECAST_ALERT_COOLDOWN_KEY = "forecast_alert_cooldown_minutes"
 FORECAST_ALERT_HORIZON_KEY = "forecast_alert_default_horizon_hours"
 FORECAST_ALERT_MODEL_PARAMS_KEY = "forecast_alert_model_params"
-MODEL_VERSION = "segmented_pressure_v1"
+MODEL_VERSION = "heuristic_pressure_v1"
+PRIMARY_OBSERVED_STATION = "A5151"
 
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "lambda_decay": 0.97,
     "pump_on_rise_mm": 50.0,
-    "pump_capacity_mm_per_min": 1.05,
+    "net_drawdown_by_pump_count_cm_per_h": {
+        "0": 0.0,
+        "1": None,
+        "2": 6.23,
+        "3": None,
+    },
+    "drawdown_parameter_status": {
+        "0": "defined",
+        "1": "unknown",
+        "2": "inferred",
+        "3": "unknown",
+    },
     "weak_rain_pressure_mm": 8.0,
     "moderate_rain_pressure_mm": 24.0,
     "heavy_rain_pressure_mm": 55.0,
@@ -59,7 +71,7 @@ DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "watch_rise_mm": 80.0,
 }
 
-RISK_ORDER = {"normal": 0, "watch": 1, "warning": 2, "critical": 3}
+RISK_ORDER = {"unknown": 0, "normal": 1, "watch": 2, "warning": 3, "critical": 4}
 SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
@@ -90,12 +102,71 @@ def _normalize_json_object(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Reject dangerous or nonsensical model parameter overrides."""
+    validated = dict(DEFAULT_MODEL_PARAMS)
+    validated.update(params)
+
+    lambda_decay = validated.get("lambda_decay")
+    if lambda_decay is not None:
+        try:
+            lambda_decay = float(lambda_decay)
+        except (TypeError, ValueError):
+            lambda_decay = 0.97
+        if not (0.0 <= lambda_decay <= 1.0):
+            lambda_decay = 0.97
+        validated["lambda_decay"] = lambda_decay
+
+    pump_on_rise = validated.get("pump_on_rise_mm")
+    if pump_on_rise is not None:
+        try:
+            pump_on_rise = float(pump_on_rise)
+        except (TypeError, ValueError):
+            pump_on_rise = None
+        if pump_on_rise is None or pump_on_rise < 0:
+            pump_on_rise = 50.0
+        validated["pump_on_rise_mm"] = pump_on_rise
+
+    for key in ("watch_rise_mm", "warning_rise_mm", "critical_rise_mm"):
+        value = validated.get(key)
+        if value is not None:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = None
+            if value is None or value < 0:
+                value = DEFAULT_MODEL_PARAMS.get(key)
+            validated[key] = value
+
+    watch = _to_float(validated.get("watch_rise_mm"), 80.0)
+    warning = _to_float(validated.get("warning_rise_mm"), 120.0)
+    critical = _to_float(validated.get("critical_rise_mm"), 250.0)
+    if not (watch < warning < critical):
+        validated["watch_rise_mm"] = 80.0
+        validated["warning_rise_mm"] = 120.0
+        validated["critical_rise_mm"] = 250.0
+
+    drawdown = _normalize_json_object(validated.get("net_drawdown_by_pump_count_cm_per_h"))
+    default_drawdown = DEFAULT_MODEL_PARAMS["net_drawdown_by_pump_count_cm_per_h"]
+    for pump_count in ("0", "1", "2", "3"):
+        if pump_count not in drawdown:
+            drawdown[pump_count] = default_drawdown.get(pump_count)
+    validated["net_drawdown_by_pump_count_cm_per_h"] = drawdown
+
+    # Reject the legacy single-pump-capacity field if present; replace with inferred table.
+    if "pump_capacity_mm_per_min" in validated or "pump_capacity_mm_per_hour" in validated:
+        validated.pop("pump_capacity_mm_per_min", None)
+        validated.pop("pump_capacity_mm_per_hour", None)
+
+    return validated
+
+
 def _merge_params(*items: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_MODEL_PARAMS)
     for item in items:
         if item:
             merged.update(item)
-    return merged
+    return _validate_model_params(merged)
 
 
 def _rolling_max(values: list[float], window: int) -> float:
@@ -238,25 +309,57 @@ async def upsert_forecast_alert_profiles(
     await db.flush()
 
 
-async def _latest_sensor_reading(db: AsyncSession, sensor_id: str) -> SensorReading | None:
-    return await db.scalar(
+async def _latest_sensor_reading(
+    db: AsyncSession,
+    sensor_id: str,
+    *,
+    now: datetime,
+    max_age_seconds: int | None = None,
+) -> dict[str, Any] | None:
+    """Return latest reading with freshness check.
+
+    max_age_seconds defaults to 2 * sensor.normal_interval if the sensor
+    exists; otherwise 3600 seconds. If the reading is stale, it is still
+    returned so the caller can record a degraded/unavailable data status.
+    """
+    sensor = await db.scalar(select(Sensor).where(Sensor.sensor_id == sensor_id))
+    if max_age_seconds is None:
+        max_age_seconds = int((sensor.normal_interval if sensor else 1800) * 2)
+
+    reading = await db.scalar(
         select(SensorReading)
         .where(SensorReading.sensor_id == sensor_id)
         .where(SensorReading.water_level.is_not(None))
         .order_by(desc(SensorReading.recorded_at))
         .limit(1)
     )
+    if reading is None:
+        return None
+
+    age_seconds = (now - reading.recorded_at).total_seconds()
+    is_stale = age_seconds > max_age_seconds
+    return {
+        "reading": reading,
+        "age_seconds": age_seconds,
+        "is_stale": is_stale,
+        "max_age_seconds": max_age_seconds,
+    }
 
 
-async def _select_station_id(
+async def _select_rain_source(
     db: AsyncSession,
     requested_station_id: str | None,
     *,
     now_hour: datetime,
     horizon_hours: int,
-) -> str | None:
-    if requested_station_id:
-        return requested_station_id
+) -> dict[str, Any]:
+    """Choose observed and forecast rainfall sources independently.
+
+    Observed rainfall is fixed to A5151 when possible. Forecast rainfall
+    falls back to 58362 only when A5151 has no forecast data, and the
+    downgrade is explicitly flagged.
+    """
+    actual_station_id = PRIMARY_OBSERVED_STATION
 
     stations = (
         await db.execute(
@@ -266,20 +369,55 @@ async def _select_station_id(
         )
     ).scalars().all()
     if not stations:
-        return None
+        return {
+            "actual_station_id": None,
+            "forecast_station_id": None,
+            "rain_source_degraded": False,
+            "degraded_reason": None,
+        }
+
+    # If A5151 is not an active station, observed source is degraded.
+    active_station_ids = {s.station_id for s in stations}
+    if PRIMARY_OBSERVED_STATION not in active_station_ids:
+        actual_station_id = next(
+            (s.station_id for s in stations if s.role == "primary"),
+            stations[0].station_id,
+        )
 
     end_time = now_hour + timedelta(hours=horizon_hours)
+    candidate_station_ids = [requested_station_id] if requested_station_id else []
+    if PRIMARY_OBSERVED_STATION not in candidate_station_ids:
+        candidate_station_ids.append(PRIMARY_OBSERVED_STATION)
     for station in stations:
+        if station.station_id not in candidate_station_ids:
+            candidate_station_ids.append(station.station_id)
+
+    forecast_station_id = None
+    for station_id in candidate_station_ids:
         count = await db.scalar(
             select(func.count())
             .select_from(RainfallForecastHourly)
-            .where(RainfallForecastHourly.station_id == station.station_id)
+            .where(RainfallForecastHourly.station_id == station_id)
             .where(RainfallForecastHourly.hour_time >= now_hour)
             .where(RainfallForecastHourly.hour_time < end_time)
         )
         if count:
-            return station.station_id
-    return stations[0].station_id
+            forecast_station_id = station_id
+            break
+
+    rain_source_degraded = forecast_station_id != PRIMARY_OBSERVED_STATION
+    degraded_reason = None
+    if forecast_station_id is None:
+        degraded_reason = "NO_FORECAST_AVAILABLE"
+    elif rain_source_degraded:
+        degraded_reason = "A5151_FORECAST_MISSING"
+
+    return {
+        "actual_station_id": actual_station_id,
+        "forecast_station_id": forecast_station_id,
+        "rain_source_degraded": rain_source_degraded,
+        "degraded_reason": degraded_reason,
+    }
 
 
 async def _forecast_rows(
@@ -323,17 +461,32 @@ def _hourly_forecast_series(
     *,
     now_hour: datetime,
     horizon_hours: int,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """Build hourly forecast series while distinguishing real zeros from missing hours."""
     row_by_hour = {row.hour_time: row for row in rows}
     series = []
+    gap_hours = []
     for offset in range(horizon_hours):
         hour_time = now_hour + timedelta(hours=offset)
         row = row_by_hour.get(hour_time)
-        series.append({
-            "hour_time": hour_time,
-            "rainfall_mm": _to_float(row.rainfall_mm if row else 0, 0.0),
-        })
-    return series
+        if row is None:
+            gap_hours.append(hour_time.isoformat())
+            series.append({
+                "hour_time": hour_time,
+                "rainfall_mm": None,
+                "is_gap": True,
+            })
+        else:
+            series.append({
+                "hour_time": hour_time,
+                "rainfall_mm": _to_float(row.rainfall_mm, 0.0),
+                "is_gap": False,
+            })
+    return {
+        "series": series,
+        "forecast_gap_hours": gap_hours,
+        "has_gaps": bool(gap_hours),
+    }
 
 
 def _risk_from_thresholds(
@@ -383,6 +536,43 @@ def _severity_for_risk(risk_level: str) -> str:
     return Severity.CRITICAL.value if risk_level == "critical" else Severity.HIGH.value
 
 
+def _drawdown_for_pump_count(params: dict[str, Any], pump_count: int) -> float | None:
+    drawdown = _normalize_json_object(params.get("net_drawdown_by_pump_count_cm_per_h"))
+    value = drawdown.get(str(pump_count))
+    if value is None:
+        return None
+    return _to_float(value, None)
+
+
+def _policy_floor(
+    rainfall_values: list[float | None],
+    p_total: float,
+    i_1h_max: float,
+    params: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Return safety policy floor risk and reason, independent of model prediction."""
+    if p_total > 35 and i_1h_max > 12:
+        return "critical", "EXTREME_RAINFALL"
+    if p_total > 20 and i_1h_max > 7:
+        return "warning", "STRONG_RAINFALL"
+    return "normal", None
+
+
+def _data_status_from_gaps_and_staleness(
+    has_station: bool,
+    has_reading: bool,
+    reading_stale: bool,
+    forecast_available: bool,
+    has_forecast_gaps: bool,
+    forecast_gap_ratio: float,
+) -> str:
+    if not has_station or not has_reading or not forecast_available:
+        return "unavailable"
+    if reading_stale or has_forecast_gaps or forecast_gap_ratio > 0.25:
+        return "degraded"
+    return "available"
+
+
 async def _compute_prediction(
     db: AsyncSession,
     *,
@@ -398,59 +588,112 @@ async def _compute_prediction(
         profile.model_params if profile else None,
         profile.pump_params if profile else None,
     )
-    station_id = await _select_station_id(
+
+    rain_source = await _select_rain_source(
         db,
         profile.station_id if profile else None,
         now_hour=now_hour,
         horizon_hours=horizon_hours,
     )
-    latest_reading = await _latest_sensor_reading(db, sensor.sensor_id)
+    actual_station_id = rain_source["actual_station_id"]
+    forecast_station_id = rain_source["forecast_station_id"]
+    rain_source_degraded = rain_source["rain_source_degraded"]
+    degraded_reason = rain_source["degraded_reason"]
 
-    if not station_id:
+    latest_reading_info = await _latest_sensor_reading(
+        db, sensor.sensor_id, now=now
+    )
+    has_reading = latest_reading_info is not None
+    reading_stale = latest_reading_info["is_stale"] if latest_reading_info else False
+    latest_reading = latest_reading_info["reading"] if latest_reading_info else None
+
+    has_forecast_station = forecast_station_id is not None
+    rows = await _forecast_rows(
+        db, forecast_station_id, now_hour=now_hour, horizon_hours=horizon_hours
+    ) if has_forecast_station else []
+    forecast_available = bool(rows)
+
+    forecast_series_result = _hourly_forecast_series(
+        rows, now_hour=now_hour, horizon_hours=horizon_hours
+    )
+    forecast_series = forecast_series_result["series"]
+    has_forecast_gaps = forecast_series_result["has_gaps"]
+    forecast_gap_hours = forecast_series_result["forecast_gap_hours"]
+    forecast_gap_ratio = len(forecast_gap_hours) / max(horizon_hours, 1)
+
+    data_status = _data_status_from_gaps_and_staleness(
+        has_station=actual_station_id is not None,
+        has_reading=has_reading,
+        reading_stale=reading_stale,
+        forecast_available=forecast_available,
+        has_forecast_gaps=has_forecast_gaps,
+        forecast_gap_ratio=forecast_gap_ratio,
+    )
+
+    # If data is unavailable, do not create new risk conclusions or clear existing alerts.
+    if data_status == "unavailable":
         return {
             "sensor": sensor,
-            "station_id": None,
-            "risk_level": "normal",
+            "actual_station_id": actual_station_id,
+            "forecast_station_id": forecast_station_id,
+            "rain_source_degraded": rain_source_degraded,
+            "degraded_reason": degraded_reason,
+            "data_status": data_status,
+            "risk_level": "unknown",
+            "model_risk": "unknown",
+            "policy_floor": "normal",
+            "effective_risk": "unknown",
+            "policy_reason": None,
             "should_notify": False,
-            "decision_reason": "没有可用雨量站",
-            "features": {},
+            "decision_reason": "输入数据不可用，不生成风险结论",
+            "latest_distance_cm": _to_float(latest_reading.water_level, None) if latest_reading else None,
+            "features": {
+                "actual_station_id": actual_station_id,
+                "forecast_station_id": forecast_station_id,
+                "rain_source_degraded": rain_source_degraded,
+                "degraded_reason": degraded_reason,
+                "forecast_gap_hours": forecast_gap_hours,
+                "reading_stale": reading_stale,
+            },
             "series": [],
             "control_recommendation": {"mode": "recommendation_only", "executable": False, "action": "none"},
+            "model_version": MODEL_VERSION,
         }
+
+    # Reading is required for a distance-based prediction.
     if latest_reading is None:
+        # This branch is defensive; data_status should already be unavailable.
         return {
             "sensor": sensor,
-            "station_id": station_id,
-            "risk_level": "normal",
+            "actual_station_id": actual_station_id,
+            "forecast_station_id": forecast_station_id,
+            "rain_source_degraded": rain_source_degraded,
+            "degraded_reason": degraded_reason,
+            "data_status": "unavailable",
+            "risk_level": "unknown",
+            "model_risk": "unknown",
+            "policy_floor": "normal",
+            "effective_risk": "unknown",
+            "policy_reason": None,
             "should_notify": False,
             "decision_reason": "没有可用于预测的最新超声波测距读数",
-            "features": {"station_id": station_id},
+            "features": {
+                "actual_station_id": actual_station_id,
+                "forecast_station_id": forecast_station_id,
+                "rain_source_degraded": rain_source_degraded,
+            },
             "series": [],
             "control_recommendation": {"mode": "recommendation_only", "executable": False, "action": "none"},
+            "model_version": MODEL_VERSION,
         }
 
-    rows = await _forecast_rows(db, station_id, now_hour=now_hour, horizon_hours=horizon_hours)
-    if not rows:
-        return {
-            "sensor": sensor,
-            "station_id": station_id,
-            "risk_level": "normal",
-            "should_notify": False,
-            "decision_reason": "没有可用于预测的未来小时雨量预报",
-            "latest_distance_cm": latest_reading.water_level,
-            "features": {"station_id": station_id},
-            "series": [],
-            "control_recommendation": {"mode": "recommendation_only", "executable": False, "action": "none"},
-        }
-
-    forecast_series = _hourly_forecast_series(rows, now_hour=now_hour, horizon_hours=horizon_hours)
-    rainfall_values = [item["rainfall_mm"] for item in forecast_series]
+    rainfall_values = [item["rainfall_mm"] for item in forecast_series if item["rainfall_mm"] is not None]
     p_total = sum(rainfall_values)
     i_1h_max = max(rainfall_values) if rainfall_values else 0.0
     p_3h_max = _rolling_max(rainfall_values, 3)
     p_6h_max = _rolling_max(rainfall_values, 6)
-    api_24h = await _actual_total(db, station_id, now_hour=now_hour, hours=24)
-    api_72h = await _actual_total(db, station_id, now_hour=now_hour, hours=72)
+    api_24h = await _actual_total(db, actual_station_id, now_hour=now_hour, hours=24)
+    api_72h = await _actual_total(db, actual_station_id, now_hour=now_hour, hours=72)
     forecast_issued_at = max((row.forecast_issued_at or row.batch_time for row in rows), default=None)
 
     latest_distance_cm = _to_float(latest_reading.water_level, 0.0)
@@ -459,23 +702,39 @@ async def _compute_prediction(
     h_start_mm = max(0.0, (baseline_cm - latest_distance_cm) * 10)
     lambda_decay = _to_float(model_params.get("lambda_decay"), 0.97)
     pump_on_rise_mm = _to_float(model_params.get("pump_on_rise_mm"), 50.0)
-    pump_capacity_mm_per_min = _to_float(model_params.get("pump_capacity_mm_per_min"), 1.05)
+    q2_cm_per_h = _drawdown_for_pump_count(model_params, 2)
+    if q2_cm_per_h is None:
+        q2_cm_per_h = 6.23
+    q2_mm_per_h = q2_cm_per_h * 10.0
 
-    free_level = h_start_mm
-    observed_level = h_start_mm
-    peak_free = h_start_mm
-    peak_observed = h_start_mm
+    free_level = 0.0
+    observed_level = 0.0
+    peak_free = 0.0
+    peak_observed = 0.0
     peak_time = forecast_series[0]["hour_time"] if forecast_series else now_hour
     predicted_series: list[dict[str, Any]] = []
 
     for item in forecast_series:
+        if item["is_gap"]:
+            predicted_series.append({
+                "hour_time": item["hour_time"].isoformat(),
+                "rainfall_mm": None,
+                "rainfall_pressure_mm": None,
+                "free_rise_mm": round(free_level, 2),
+                "observed_rise_mm": round(observed_level, 2),
+                "pump_active": False,
+                "pump_output_mm": 0.0,
+                "is_gap": True,
+            })
+            continue
+
         pressure = _rainfall_pressure_mm(item["rainfall_mm"], model_params)
         free_level = max(0.0, free_level * lambda_decay + pressure)
         observed_level = max(0.0, observed_level * lambda_decay + pressure)
         pump_active = observed_level > pump_on_rise_mm
         pump_output_mm = 0.0
         if pump_active:
-            pump_output_mm = pump_capacity_mm_per_min * 60
+            pump_output_mm = q2_mm_per_h
             observed_level = max(0.0, observed_level - pump_output_mm)
 
         if free_level > peak_free:
@@ -492,38 +751,43 @@ async def _compute_prediction(
             "pump_output_mm": round(pump_output_mm, 2),
         })
 
-    lower_bound_reason = ""
-    if p_total > 35 and i_1h_max > 12:
-        lower_bound = _to_float(model_params.get("extreme_event_min_rise_mm"), 300.0)
-        lower_bound_reason = "暴雨事件下限"
-    elif p_total > 20 and i_1h_max > 7:
-        lower_bound = _to_float(model_params.get("strong_event_min_rise_mm"), 110.0)
-        lower_bound_reason = "强降雨事件下限"
-    else:
-        lower_bound = 0.0
-    if lower_bound and peak_free < lower_bound:
-        peak_free = lower_bound
-        peak_time = max(forecast_series, key=lambda item: item["rainfall_mm"])["hour_time"]
-        peak_observed = max(peak_observed, min(peak_free, pump_on_rise_mm + 10.0))
+    # Total predicted rise relative to baseline includes existing h_start + future rise.
+    predicted_free_rise_mm = h_start_mm + peak_free
+    predicted_observed_rise_mm = h_start_mm + peak_observed
 
-    projected_distance_cm = latest_distance_cm - peak_observed / 10
-    threshold_risk = _risk_from_thresholds(sensor, projected_distance_cm)
-    rise_risk = _risk_from_rise(peak_free, peak_observed, profile, model_params)
-    risk_level = _max_risk(threshold_risk, rise_risk)
-    should_notify = risk_level in {"warning", "critical"}
+    model_threshold_risk = _risk_from_thresholds(sensor, baseline_cm - predicted_observed_rise_mm / 10)
+    model_rise_risk = _risk_from_rise(predicted_free_rise_mm, predicted_observed_rise_mm, profile, model_params)
+    model_risk = _max_risk(model_threshold_risk, model_rise_risk)
+
+    policy_floor, policy_reason = _policy_floor(forecast_series, p_total, i_1h_max, model_params)
+    effective_risk = _max_risk(model_risk, policy_floor)
+    should_notify = effective_risk in {"warning", "critical"}
 
     confidence = 0.75
     if not has_baseline:
         confidence -= 0.15
     if len(rows) < horizon_hours:
         confidence -= 0.15
-    if lower_bound_reason:
-        confidence = max(confidence, 0.7)
-    confidence = max(0.35, min(0.9, confidence))
+    if has_forecast_gaps:
+        confidence -= 0.15
+    if data_status == "degraded":
+        confidence -= 0.1
+    if policy_reason:
+        # Policy floor indicates model uncertainty, not higher confidence.
+        confidence -= 0.1
+    confidence = max(0.2, min(0.9, confidence))
+
+    projected_distance_cm = baseline_cm - predicted_observed_rise_mm / 10
 
     features = {
-        "station_id": station_id,
+        "actual_station_id": actual_station_id,
+        "forecast_station_id": forecast_station_id,
+        "rain_source_degraded": rain_source_degraded,
+        "degraded_reason": degraded_reason,
+        "data_status": data_status,
         "forecast_hours_available": len(rows),
+        "forecast_gap_hours": forecast_gap_hours,
+        "forecast_gap_ratio": round(forecast_gap_ratio, 2),
         "p_total_mm": round(p_total, 2),
         "i_1h_max_mm": round(i_1h_max, 2),
         "p_3h_max_mm": round(p_3h_max, 2),
@@ -532,23 +796,38 @@ async def _compute_prediction(
         "api_72h_mm": round(api_72h, 2),
         "h_start_mm": round(h_start_mm, 2),
         "has_baseline": has_baseline,
-        "threshold_risk": threshold_risk,
-        "rise_risk": rise_risk,
-        "lower_bound_reason": lower_bound_reason,
+        "model_risk": model_risk,
+        "policy_floor": policy_floor,
+        "effective_risk": effective_risk,
+        "policy_reason": policy_reason,
+        "reading_stale": reading_stale,
+        "validated_params": {
+            "lambda_decay": model_params.get("lambda_decay"),
+            "pump_on_rise_mm": model_params.get("pump_on_rise_mm"),
+            "net_drawdown_by_pump_count_cm_per_h": model_params.get("net_drawdown_by_pump_count_cm_per_h"),
+            "drawdown_parameter_status": model_params.get("drawdown_parameter_status"),
+        },
     }
+
     decision_reason = (
         f"未来{horizon_hours}小时累计雨量 {p_total:.1f} mm，峰值小时雨强 {i_1h_max:.1f} mm/h，"
-        f"预计无泵等效上涨 {peak_free:.1f} mm，考虑泵削峰后上涨 {peak_observed:.1f} mm"
+        f"当前相对 baseline 上涨 {h_start_mm:.1f} mm，"
+        f"预计无泵等效上涨 {predicted_free_rise_mm:.1f} mm，"
+        f"考虑泵削峰后上涨 {predicted_observed_rise_mm:.1f} mm"
     )
-    if lower_bound_reason:
-        decision_reason += f"，已应用{lower_bound_reason}"
+    if policy_reason:
+        decision_reason += f"，安全策略下限已触发：{policy_reason}"
+    if rain_source_degraded:
+        decision_reason += f"，雨量源降级：{degraded_reason}"
+    if data_status == "degraded":
+        decision_reason += "，数据状态降级"
 
     recommendation = await get_pump_controller().build_recommendation(
         PumpControlContext(
             sensor_id=sensor.sensor_id,
-            risk_level=risk_level,
-            predicted_free_rise_mm=peak_free,
-            predicted_observed_rise_mm=peak_observed,
+            risk_level=effective_risk,
+            predicted_free_rise_mm=predicted_free_rise_mm,
+            predicted_observed_rise_mm=predicted_observed_rise_mm,
             pump_on_rise_mm=pump_on_rise_mm,
             actuator_binding_id=profile.actuator_binding_id if profile else None,
         )
@@ -556,14 +835,22 @@ async def _compute_prediction(
 
     return {
         "sensor": sensor,
-        "station_id": station_id,
-        "risk_level": risk_level,
+        "actual_station_id": actual_station_id,
+        "forecast_station_id": forecast_station_id,
+        "rain_source_degraded": rain_source_degraded,
+        "degraded_reason": degraded_reason,
+        "data_status": data_status,
+        "risk_level": effective_risk,
+        "model_risk": model_risk,
+        "policy_floor": policy_floor,
+        "effective_risk": effective_risk,
+        "policy_reason": policy_reason,
         "should_notify": should_notify,
         "horizon_hours": horizon_hours,
         "forecast_issued_at": forecast_issued_at,
         "peak_time": peak_time,
-        "predicted_free_rise_mm": peak_free,
-        "predicted_observed_rise_mm": peak_observed,
+        "predicted_free_rise_mm": predicted_free_rise_mm,
+        "predicted_observed_rise_mm": predicted_observed_rise_mm,
         "projected_distance_cm": projected_distance_cm,
         "latest_distance_cm": latest_distance_cm,
         "confidence": confidence,
@@ -609,7 +896,16 @@ def _build_alert_details(result: ForecastPredictionResult) -> dict[str, Any]:
         "prediction_result_id": result.id,
         "prediction_run_id": result.run_id,
         "station_id": result.station_id,
+        "actual_station_id": result.actual_station_id,
+        "forecast_station_id": result.forecast_station_id,
+        "rain_source_degraded": result.rain_source_degraded,
+        "degraded_reason": result.degraded_reason,
+        "data_status": result.data_status,
         "risk_level": result.risk_level,
+        "model_risk": result.model_risk,
+        "policy_floor": result.policy_floor,
+        "effective_risk": result.effective_risk,
+        "policy_reason": result.policy_reason,
         "horizon_hours": result.horizon_hours,
         "forecast_issued_at": result.forecast_issued_at.isoformat() if result.forecast_issued_at else None,
         "peak_time": result.peak_time.isoformat() if result.peak_time else None,
@@ -634,6 +930,9 @@ async def _handle_forecast_alert_lifecycle(
     now: datetime,
 ) -> tuple[Alert | None, bool]:
     active_alerts = await _active_forecast_alerts(db, sensor.sensor_id)
+    if result.data_status == "unavailable" or result.risk_level in {"unknown"}:
+        # Do not create new conclusions and do not auto-clear existing alerts.
+        return None, False
     if not result.should_notify:
         await _resolve_forecast_alerts(db, sensor.sensor_id, now)
         return None, False
@@ -714,68 +1013,95 @@ async def evaluate_forecast_alerts(
     results: list[ForecastPredictionResult] = []
     latest_forecast_issued_at: datetime | None = None
     global_params = global_config.get("model_params") or {}
+    any_failed = False
 
     for sensor in sensors:
-        profile = sensor.forecast_alert_profile
-        if not dry_run and (profile is None or not profile.is_enabled):
-            continue
-        effective_horizon = int(
-            horizon_hours
-            or (profile.horizon_hours if profile and profile.horizon_hours else global_config["default_horizon_hours"])
-            or 6
-        )
-        effective_horizon = max(1, min(24, effective_horizon))
-        prediction = await _compute_prediction(
-            db,
-            sensor=sensor,
-            profile=profile,
-            global_params=global_params,
-            horizon_hours=effective_horizon,
-            now=now,
-        )
-        latest_forecast_issued_at = max(
-            [value for value in (latest_forecast_issued_at, prediction.get("forecast_issued_at")) if value],
-            default=None,
-        )
-        result = ForecastPredictionResult(
-            run_id=run.id,
-            sensor_id=sensor.sensor_id,
-            station_id=prediction.get("station_id"),
-            risk_level=prediction.get("risk_level", "normal"),
-            should_notify=bool(prediction.get("should_notify")),
-            notification_sent=False,
-            horizon_hours=prediction.get("horizon_hours") or effective_horizon,
-            forecast_issued_at=prediction.get("forecast_issued_at"),
-            peak_time=prediction.get("peak_time"),
-            predicted_free_rise_mm=_to_decimal(prediction.get("predicted_free_rise_mm")),
-            predicted_observed_rise_mm=_to_decimal(prediction.get("predicted_observed_rise_mm")),
-            projected_distance_cm=_to_decimal(prediction.get("projected_distance_cm")),
-            latest_distance_cm=_to_decimal(_to_float(prediction.get("latest_distance_cm"), 0.0)) if prediction.get("latest_distance_cm") is not None else None,
-            confidence=_to_decimal(prediction.get("confidence")),
-            features=prediction.get("features") or {},
-            series=prediction.get("series") or [],
-            control_recommendation=prediction.get("control_recommendation") or {},
-            decision_reason=prediction.get("decision_reason"),
-            model_version=MODEL_VERSION,
-            created_at=now,
-        )
-        db.add(result)
-        await db.flush()
-
-        if not dry_run:
-            alert, notification_sent = await _handle_forecast_alert_lifecycle(
+        try:
+            profile = sensor.forecast_alert_profile
+            if not dry_run and (profile is None or not profile.is_enabled):
+                continue
+            effective_horizon = int(
+                horizon_hours
+                or (profile.horizon_hours if profile and profile.horizon_hours else global_config["default_horizon_hours"])
+                or 6
+            )
+            effective_horizon = max(1, min(24, effective_horizon))
+            prediction = await _compute_prediction(
                 db,
-                control_db,
                 sensor=sensor,
-                result=result,
+                profile=profile,
+                global_params=global_params,
+                horizon_hours=effective_horizon,
                 now=now,
             )
-            result.alert_id = alert.id if alert else None
-            result.notification_sent = notification_sent
+            latest_forecast_issued_at = max(
+                [value for value in (latest_forecast_issued_at, prediction.get("forecast_issued_at")) if value],
+                default=None,
+            )
+            result = ForecastPredictionResult(
+                run_id=run.id,
+                sensor_id=sensor.sensor_id,
+                station_id=prediction.get("forecast_station_id") or prediction.get("station_id"),
+                actual_station_id=prediction.get("actual_station_id"),
+                forecast_station_id=prediction.get("forecast_station_id"),
+                rain_source_degraded=bool(prediction.get("rain_source_degraded")),
+                degraded_reason=prediction.get("degraded_reason"),
+                data_status=prediction.get("data_status", "unavailable"),
+                risk_level=prediction.get("risk_level", "unknown"),
+                model_risk=prediction.get("model_risk"),
+                policy_floor=prediction.get("policy_floor"),
+                effective_risk=prediction.get("effective_risk"),
+                policy_reason=prediction.get("policy_reason"),
+                should_notify=bool(prediction.get("should_notify")),
+                notification_sent=False,
+                horizon_hours=prediction.get("horizon_hours") or effective_horizon,
+                forecast_issued_at=prediction.get("forecast_issued_at"),
+                peak_time=prediction.get("peak_time"),
+                predicted_free_rise_mm=_to_decimal(prediction.get("predicted_free_rise_mm")),
+                predicted_observed_rise_mm=_to_decimal(prediction.get("predicted_observed_rise_mm")),
+                projected_distance_cm=_to_decimal(prediction.get("projected_distance_cm")),
+                latest_distance_cm=_to_decimal(_to_float(prediction.get("latest_distance_cm"), 0.0)) if prediction.get("latest_distance_cm") is not None else None,
+                confidence=_to_decimal(prediction.get("confidence")),
+                features=prediction.get("features") or {},
+                series=prediction.get("series") or [],
+                control_recommendation=prediction.get("control_recommendation") or {},
+                decision_reason=prediction.get("decision_reason"),
+                model_version=MODEL_VERSION,
+                created_at=now,
+            )
+            db.add(result)
+            await db.flush()
 
-        results.append(result)
+            if not dry_run:
+                alert, notification_sent = await _handle_forecast_alert_lifecycle(
+                    db,
+                    control_db,
+                    sensor=sensor,
+                    result=result,
+                    now=now,
+                )
+                result.alert_id = alert.id if alert else None
+                result.notification_sent = notification_sent
 
-    run.status = "completed"
+            results.append(result)
+        except Exception as exc:
+            error_result = ForecastPredictionResult(
+                run_id=run.id,
+                sensor_id=sensor.sensor_id,
+                risk_level="unknown",
+                data_status="unavailable",
+                should_notify=False,
+                decision_reason=f"预测运行异常: {exc}",
+                features={"error": str(exc)},
+                model_version=MODEL_VERSION,
+                created_at=now,
+            )
+            db.add(error_result)
+            await db.flush()
+            results.append(error_result)
+            any_failed = True
+
+    run.status = "partial" if any_failed else "completed"
     run.message = f"已评估 {len(results)} 个传感器"
     run.forecast_issued_at = latest_forecast_issued_at
     run.completed_at = utcnow_naive()

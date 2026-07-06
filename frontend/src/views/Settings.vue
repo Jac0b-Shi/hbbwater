@@ -218,9 +218,9 @@
                 <el-input-number v-model="row.pump_on_rise_mm" :min="0" :max="1000" size="small" />
               </template>
             </el-table-column>
-            <el-table-column label="泵能力(mm/min)" width="150">
+            <el-table-column label="两泵净降深(cm/h)" width="160">
               <template #default="{ row }">
-                <el-input-number v-model="row.pump_capacity_mm_per_min" :min="0" :max="10" :step="0.01" size="small" />
+                <el-input-number v-model="row.net_drawdown_2_cm_per_h" :min="0" :max="20" :step="0.01" size="small" />
               </template>
             </el-table-column>
           </el-table>
@@ -255,8 +255,8 @@
                   <el-form-item label="危险(mm)">
                     <el-input-number v-model="profile.critical_rise_mm" :min="0" :max="1000" />
                   </el-form-item>
-                  <el-form-item label="泵能力">
-                    <el-input-number v-model="profile.pump_capacity_mm_per_min" :min="0" :max="10" :step="0.01" />
+                  <el-form-item label="两泵净降深(cm/h)">
+                    <el-input-number v-model="profile.net_drawdown_2_cm_per_h" :min="0" :max="20" :step="0.01" />
                   </el-form-item>
                 </div>
               </el-form>
@@ -725,6 +725,13 @@ const getPumpParam = (profile, key, fallback) => {
   return Number.isFinite(number) ? number : fallback
 }
 
+const getNetDrawdown = (profile, pumpCount, fallback) => {
+  const table = profile.pump_params?.net_drawdown_by_pump_count_cm_per_h
+  const value = table?.[pumpCount]
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
 const applyForecastConfig = (payload) => {
   if (!payload) return
   forecastGlobalConfig.value = {
@@ -742,7 +749,7 @@ const applyForecastConfig = (payload) => {
     warning_rise_mm: toNumberOrNull(profile.warning_rise_mm),
     critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
     pump_on_rise_mm: getPumpParam(profile, 'pump_on_rise_mm', 50),
-    pump_capacity_mm_per_min: getPumpParam(profile, 'pump_capacity_mm_per_min', 1.05),
+    net_drawdown_2_cm_per_h: getNetDrawdown(profile, '2', 6.23),
   }))
 }
 
@@ -757,20 +764,34 @@ const buildForecastConfigPayload = () => ({
     ...forecastGlobalConfig.value,
     model_params: parseJsonObject(forecastModelParamsText.value),
   },
-  profiles: forecastProfiles.value.map(profile => ({
-    sensor_id: profile.sensor_id,
-    is_enabled: Boolean(profile.is_enabled),
-    station_id: profile.station_id || null,
-    horizon_hours: Number(profile.horizon_hours || forecastGlobalConfig.value.default_horizon_hours || 6),
-    warning_rise_mm: toNumberOrNull(profile.warning_rise_mm),
-    critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
-    model_params: profile.model_params || null,
-    pump_params: {
-      pump_on_rise_mm: Number(profile.pump_on_rise_mm || 50),
-      pump_capacity_mm_per_min: Number(profile.pump_capacity_mm_per_min || 1.05),
-    },
-    actuator_binding_id: profile.actuator_binding_id || null,
-  }))
+  profiles: forecastProfiles.value.map(profile => {
+    const netDrawdown2 = Number(profile.net_drawdown_2_cm_per_h ?? 6.23)
+    return {
+      sensor_id: profile.sensor_id,
+      is_enabled: Boolean(profile.is_enabled),
+      station_id: profile.station_id || null,
+      horizon_hours: Number(profile.horizon_hours || forecastGlobalConfig.value.default_horizon_hours || 6),
+      warning_rise_mm: toNumberOrNull(profile.warning_rise_mm),
+      critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
+      model_params: profile.model_params || null,
+      pump_params: {
+        pump_on_rise_mm: Number(profile.pump_on_rise_mm || 50),
+        net_drawdown_by_pump_count_cm_per_h: {
+          '0': 0,
+          '1': null,
+          '2': netDrawdown2,
+          '3': null,
+        },
+        drawdown_parameter_status: {
+          '0': 'defined',
+          '1': 'unknown',
+          '2': 'inferred',
+          '3': 'unknown',
+        },
+      },
+      actuator_binding_id: profile.actuator_binding_id || null,
+    }
+  })
 })
 
 const buildBusinessProfilePayload = (extra = {}) => {
