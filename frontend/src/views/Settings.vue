@@ -179,7 +179,7 @@
                 v-model="forecastModelParamsText"
                 type="textarea"
                 :autosize="{ minRows: 3, maxRows: 8 }"
-                placeholder='{"lambda_decay":0.97,"pump_on_rise_mm":50}'
+                placeholder='{"lambda_decay":0.97,"forecast_gap_ratio_threshold":0.25}'
               />
             </el-form-item>
           </el-form>
@@ -215,19 +215,32 @@
                 <el-input-number v-model="row.horizon_hours" :min="1" :max="24" size="small" />
               </template>
             </el-table-column>
-            <el-table-column label="预警(mm)" width="130">
+            <el-table-column label="预测上涨预警(mm)" width="150">
               <template #default="{ row }">
                 <el-input-number v-model="row.warning_rise_mm" :min="0" :max="1000" size="small" />
               </template>
             </el-table-column>
-            <el-table-column label="危险(mm)" width="130">
+            <el-table-column label="预测上涨危险(mm)" width="150">
               <template #default="{ row }">
                 <el-input-number v-model="row.critical_rise_mm" :min="0" :max="1000" size="small" />
               </template>
             </el-table-column>
-            <el-table-column label="泵阈值(mm)" width="130">
+            <el-table-column label="泵情景基准" width="130">
               <template #default="{ row }">
-                <el-input-number v-model="row.pump_on_rise_mm" :min="0" :max="1000" size="small" />
+                <el-select v-model="row.pump_trigger_anchor" size="small">
+                  <el-option label="预警线" value="warning" />
+                  <el-option label="危险线" value="danger" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="提前余量(mm)" width="130">
+              <template #default="{ row }">
+                <el-input-number v-model="row.pump_trigger_offset_mm" :min="0" :max="1000" size="small" />
+              </template>
+            </el-table-column>
+            <el-table-column label="情景泵数" width="110">
+              <template #default="{ row }">
+                <el-input-number v-model="row.scenario_pump_count" :min="0" :max="3" size="small" />
               </template>
             </el-table-column>
             <el-table-column label="两泵净降深(cm/h)" width="160">
@@ -261,11 +274,23 @@
                   <el-form-item label="窗口(h)">
                     <el-input-number v-model="profile.horizon_hours" :min="1" :max="24" />
                   </el-form-item>
-                  <el-form-item label="预警(mm)">
+                  <el-form-item label="预测上涨预警(mm)">
                     <el-input-number v-model="profile.warning_rise_mm" :min="0" :max="1000" />
                   </el-form-item>
-                  <el-form-item label="危险(mm)">
+                  <el-form-item label="预测上涨危险(mm)">
                     <el-input-number v-model="profile.critical_rise_mm" :min="0" :max="1000" />
+                  </el-form-item>
+                  <el-form-item label="泵情景基准">
+                    <el-select v-model="profile.pump_trigger_anchor">
+                      <el-option label="预警线" value="warning" />
+                      <el-option label="危险线" value="danger" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item label="提前余量(mm)">
+                    <el-input-number v-model="profile.pump_trigger_offset_mm" :min="0" :max="1000" />
+                  </el-form-item>
+                  <el-form-item label="情景泵数">
+                    <el-input-number v-model="profile.scenario_pump_count" :min="0" :max="3" />
                   </el-form-item>
                   <el-form-item label="两泵净降深(cm/h)">
                     <el-input-number v-model="profile.net_drawdown_2_cm_per_h" :min="0" :max="20" :step="0.01" />
@@ -775,7 +800,9 @@ const applyForecastConfig = (payload) => {
     horizon_hours: Number(profile.horizon_hours || forecastGlobalConfig.value.default_horizon_hours || 6),
     warning_rise_mm: toNumberOrNull(profile.warning_rise_mm),
     critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
-    pump_on_rise_mm: getPumpParam(profile, 'pump_on_rise_mm', 50),
+    pump_trigger_anchor: getPumpParam(profile, 'pump_trigger_anchor', 'warning') === 'danger' ? 'danger' : 'warning',
+    pump_trigger_offset_mm: getPumpParam(profile, 'pump_trigger_offset_mm', 0),
+    scenario_pump_count: Math.max(0, Math.min(3, Math.round(getPumpParam(profile, 'scenario_pump_count', 2) || 0))),
     net_drawdown_2_cm_per_h: getNetDrawdown(profile, '2', 6.23),
   }))
 }
@@ -791,8 +818,9 @@ const buildForecastConfigPayload = () => ({
     ...forecastGlobalConfig.value,
     model_params: parseJsonObject(forecastModelParamsText.value),
   },
-  profiles: forecastProfiles.value.map(profile => {
+  profiles:   forecastProfiles.value.map(profile => {
     const netDrawdown2 = Number(profile.net_drawdown_2_cm_per_h ?? 6.23)
+    const scenarioPumpCount = Math.max(0, Math.min(3, Math.round(Number(profile.scenario_pump_count ?? 2))))
     return {
       sensor_id: profile.sensor_id,
       is_enabled: Boolean(profile.is_enabled),
@@ -802,7 +830,9 @@ const buildForecastConfigPayload = () => ({
       critical_rise_mm: toNumberOrNull(profile.critical_rise_mm),
       model_params: profile.model_params || null,
       pump_params: {
-        pump_on_rise_mm: Number(profile.pump_on_rise_mm || 50),
+        pump_trigger_anchor: profile.pump_trigger_anchor === 'danger' ? 'danger' : 'warning',
+        pump_trigger_offset_mm: Number(profile.pump_trigger_offset_mm || 0),
+        scenario_pump_count: scenarioPumpCount,
         net_drawdown_by_pump_count_cm_per_h: {
           '0': 0,
           '1': null,

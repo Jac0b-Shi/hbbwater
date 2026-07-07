@@ -410,11 +410,13 @@ class RainfallActualRevisionList(BaseModel):
 # ==================== Forecast Alert Schemas ====================
 
 class ForecastPumpParams(BaseModel):
-    """Strict schema for pump drawdown parameters."""
+    """Strict schema for pump scenario parameters."""
 
     model_config = {"extra": "forbid"}
 
-    pump_on_rise_mm: float = Field(default=50.0, ge=0, allow_inf_nan=False)
+    pump_trigger_anchor: str = Field(default="warning", pattern="^(warning|danger)$")
+    pump_trigger_offset_mm: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    scenario_pump_count: int = Field(default=2, ge=0, le=3)
     net_drawdown_by_pump_count_cm_per_h: Dict[str, Optional[float]] = Field(
         default_factory=lambda: {"0": 0.0, "1": None, "2": 6.23, "3": None},
     )
@@ -455,7 +457,6 @@ class ForecastModelParams(BaseModel):
     watch_rise_mm: float = Field(default=80.0, ge=0)
     warning_rise_mm: float = Field(default=120.0, ge=0)
     critical_rise_mm: float = Field(default=250.0, ge=0)
-    pump_on_rise_mm: float = Field(default=50.0, ge=0)
     pump_assumption: str = Field(default="inferred_q2", pattern="^(inferred_q2|measured_q2|none)$")
     forecast_gap_ratio_threshold: float = Field(default=0.25, ge=0, le=1)
 

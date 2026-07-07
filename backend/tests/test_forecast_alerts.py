@@ -1056,7 +1056,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     "critical_rise_mm": None,
                     "model_params": None,
                     "pump_params": {
-                        "pump_on_rise_mm": 50,
+                        "pump_trigger_anchor": "warning",
+                        "pump_trigger_offset_mm": 0,
+                        "scenario_pump_count": 2,
                         "net_drawdown_by_pump_count_cm_per_h": {
                             "0": 0,
                             "1": None,
@@ -1077,7 +1079,89 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
 
         pump_params = payload.profiles[0].pump_params
         self.assertIsNotNone(pump_params)
-        self.assertEqual(pump_params.pump_on_rise_mm, 50)
+        self.assertEqual(pump_params.pump_trigger_anchor, "warning")
+        self.assertEqual(pump_params.pump_trigger_offset_mm, 0)
+        self.assertEqual(pump_params.scenario_pump_count, 2)
+
+    async def test_pump_scenario_triggered_by_sensor_warning_level(self):
+        """Pump scenario should activate when projected distance reaches warning level."""
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            # warning=95cm, danger=90cm, condition=less_or_equal, baseline=100cm, latest=100cm
+            # Derived threshold = warning + 0mm = 95cm.
+            sensor, _reading, _profile = await self._seed_sensor(
+                session, baseline=Decimal("100"), latest=Decimal("100"),
+                warning=Decimal("95"), danger=Decimal("90")
+            )
+            # Rainfall pressure should push projected distance below 95cm.
+            await self._seed_forecast(session, "A5151", [20, 20, 20, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            series = result.series or []
+            active_steps = [s for s in series if s.get("scenario_pump_count")]
+            self.assertTrue(active_steps)
+            for step in active_steps:
+                self.assertEqual(step.get("pump_assumption"), "inferred_q2")
+                self.assertEqual(step.get("actual_pump_state"), "unknown")
+            # The peak projected distance should be at or below the 95cm trigger line.
+            features = result.features or {}
+            self.assertEqual(features.get("validated_params", {}).get("derived_pump_threshold_cm"), 95.0)
+
+    async def test_pump_scenario_includes_existing_rise(self):
+        """If current level is already close to warning, a small future rise should trigger pumps."""
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            # warning=95cm, danger=90cm, baseline=100cm, latest=96cm (already 4cm rise)
+            # Derived threshold = 95cm. Projected distance starts at 96cm, so only 1cm more rise triggers.
+            sensor, _reading, _profile = await self._seed_sensor(
+                session, baseline=Decimal("100"), latest=Decimal("96"),
+                warning=Decimal("95"), danger=Decimal("90")
+            )
+            # Small rainfall: only 10mm total rise, but h_start already 40mm.
+            await self._seed_forecast(session, "A5151", [2, 2, 2, 2, 2, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            series = result.series or []
+            # Because h_start is included, the scenario should eventually trigger.
+            active_steps = [s for s in series if s.get("scenario_pump_count")]
+            self.assertTrue(active_steps)
+
+    async def test_pump_scenario_offset_anchors_to_danger(self):
+        """Offset from danger should activate before danger level is reached."""
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            # danger=90cm, warning=95cm, baseline=100cm, latest=100cm
+            sensor, _reading, profile = await self._seed_sensor(
+                session, baseline=Decimal("100"), latest=Decimal("100"),
+                warning=Decimal("95"), danger=Decimal("90")
+            )
+            profile.pump_params = {
+                "pump_trigger_anchor": "danger",
+                "pump_trigger_offset_mm": 50,
+                "scenario_pump_count": 2,
+                "net_drawdown_by_pump_count_cm_per_h": {"0": 0, "1": None, "2": 6.23, "3": None},
+                "drawdown_parameter_status": {"0": "defined", "1": "unknown", "2": "inferred", "3": "unknown"},
+            }
+            # Derived threshold = danger + 50mm = 95cm, same as warning line.
+            await self._seed_forecast(session, "A5151", [20, 20, 20, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            features = result.features or {}
+            self.assertEqual(features.get("validated_params", {}).get("derived_pump_threshold_cm"), 95.0)
+            series = result.series or []
+            self.assertTrue(any(s.get("scenario_pump_count") for s in series))
 
 
 if __name__ == "__main__":

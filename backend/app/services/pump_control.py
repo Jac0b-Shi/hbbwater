@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from app.services.alerting import compare_threshold
+
 
 @dataclass(frozen=True)
 class PumpControlContext:
@@ -10,7 +12,10 @@ class PumpControlContext:
     risk_level: str
     predicted_free_rise_mm: float
     predicted_observed_rise_mm: float
-    pump_on_rise_mm: float
+    pump_scenario_active: bool = False
+    derived_pump_threshold_cm: float | None = None
+    projected_distance_cm: float | None = None
+    threshold_condition: str | None = None
     actuator_binding_id: str | None = None
     data_status: str = "available"
 
@@ -36,10 +41,21 @@ class NoopPumpController:
                 "actuator_binding_id": context.actuator_binding_id,
                 "reason": "DATA_DEGRADED",
             }
-        should_prepare = (
-            context.risk_level in {"warning", "critical"}
-            or context.predicted_free_rise_mm >= context.pump_on_rise_mm
-        )
+
+        pump_triggered = context.pump_scenario_active
+        if (
+            not pump_triggered
+            and context.derived_pump_threshold_cm is not None
+            and context.projected_distance_cm is not None
+            and context.threshold_condition is not None
+        ):
+            pump_triggered = compare_threshold(
+                context.projected_distance_cm,
+                context.derived_pump_threshold_cm,
+                context.threshold_condition,
+            )
+
+        should_prepare = context.risk_level in {"warning", "critical"} or pump_triggered
         return {
             "mode": "recommendation_only",
             "executable": False,

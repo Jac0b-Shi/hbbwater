@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
@@ -119,9 +120,11 @@ async def _get_sensor_consistency_models(control_db: AsyncSession) -> list[dict[
 
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "lambda_decay": 0.97,
-    "pump_on_rise_mm": 50.0,
     "pump_assumption": "inferred_q2",
     "forecast_gap_ratio_threshold": 0.25,
+    "pump_trigger_anchor": "warning",
+    "pump_trigger_offset_mm": 0.0,
+    "scenario_pump_count": 2,
     "net_drawdown_by_pump_count_cm_per_h": {
         "0": 0.0,
         "1": None,
@@ -163,6 +166,31 @@ def _to_decimal(value: float | None) -> Decimal | None:
     return Decimal(str(round(value, 2)))
 
 
+def _derived_pump_threshold_cm(sensor: Sensor, params: dict[str, Any]) -> float | None:
+    """Derive the absolute distance threshold that triggers the pump scenario.
+
+    The pump scenario is anchored to the sensor's warning or danger level, shifted
+    by a positive offset so that the scenario activates before the anchor line is
+    reached. The direction of the shift follows the sensor's threshold_condition.
+    """
+    anchor = params.get("pump_trigger_anchor") or DEFAULT_MODEL_PARAMS["pump_trigger_anchor"]
+    if anchor == "danger":
+        anchor_level = sensor.danger_level
+    else:
+        anchor_level = sensor.warning_level
+    if anchor_level is None:
+        return None
+
+    anchor_cm = float(anchor_level)
+    offset_mm = _to_float(params.get("pump_trigger_offset_mm"), DEFAULT_MODEL_PARAMS["pump_trigger_offset_mm"])
+    offset_cm = offset_mm / 10.0
+
+    condition = get_sensor_threshold_condition(sensor)
+    if condition == "less_or_equal":
+        return anchor_cm + offset_cm
+    return anchor_cm - offset_cm
+
+
 def _normalize_json_object(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -190,15 +218,31 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
             lambda_decay = 0.97
         validated["lambda_decay"] = lambda_decay
 
-    pump_on_rise = validated.get("pump_on_rise_mm")
-    if pump_on_rise is not None:
-        try:
-            pump_on_rise = float(pump_on_rise)
-        except (TypeError, ValueError):
-            pump_on_rise = None
-        if pump_on_rise is None or pump_on_rise < 0:
-            pump_on_rise = 50.0
-        validated["pump_on_rise_mm"] = pump_on_rise
+    pump_trigger_anchor = validated.get("pump_trigger_anchor")
+    if pump_trigger_anchor not in ("warning", "danger"):
+        pump_trigger_anchor = DEFAULT_MODEL_PARAMS["pump_trigger_anchor"]
+    validated["pump_trigger_anchor"] = pump_trigger_anchor
+
+    pump_trigger_offset = validated.get("pump_trigger_offset_mm")
+    try:
+        pump_trigger_offset = float(pump_trigger_offset)
+    except (TypeError, ValueError):
+        pump_trigger_offset = None
+    if pump_trigger_offset is None or pump_trigger_offset < 0 or not math.isfinite(pump_trigger_offset):
+        pump_trigger_offset = DEFAULT_MODEL_PARAMS["pump_trigger_offset_mm"]
+    validated["pump_trigger_offset_mm"] = pump_trigger_offset
+
+    scenario_pump_count = validated.get("scenario_pump_count")
+    try:
+        scenario_pump_count = int(scenario_pump_count)
+    except (TypeError, ValueError):
+        scenario_pump_count = None
+    if scenario_pump_count is None or not (0 <= scenario_pump_count <= 3):
+        scenario_pump_count = DEFAULT_MODEL_PARAMS["scenario_pump_count"]
+    validated["scenario_pump_count"] = scenario_pump_count
+
+    # Legacy pump_on_rise_mm is no longer used; remove it to avoid stale config.
+    validated.pop("pump_on_rise_mm", None)
 
     for key in ("watch_rise_mm", "warning_rise_mm", "critical_rise_mm"):
         value = validated.get(key)
@@ -1160,11 +1204,23 @@ async def _compute_prediction(
     has_baseline = sensor.water_level_baseline is not None
     h_start_mm = max(0.0, (baseline_cm - latest_distance_cm) * 10)
     lambda_decay = _to_float(model_params.get("lambda_decay"), 0.97)
-    pump_on_rise_mm = _to_float(model_params.get("pump_on_rise_mm"), 50.0)
-    q2_cm_per_h = _drawdown_for_pump_count(model_params, 2)
-    if q2_cm_per_h is None:
-        q2_cm_per_h = 6.23
-    q2_mm_per_h = q2_cm_per_h * 10.0
+
+    derived_pump_threshold_cm = _derived_pump_threshold_cm(sensor, model_params)
+    configured_pump_count = int(model_params.get("scenario_pump_count", DEFAULT_MODEL_PARAMS["scenario_pump_count"]))
+    drawdown_mm_per_h = 0.0
+    if configured_pump_count > 0:
+        drawdown_cm_per_h = _drawdown_for_pump_count(model_params, configured_pump_count)
+        if drawdown_cm_per_h is None and configured_pump_count != 2:
+            drawdown_cm_per_h = _drawdown_for_pump_count(model_params, 2)
+        if drawdown_cm_per_h is None:
+            drawdown_cm_per_h = 6.23
+        drawdown_mm_per_h = drawdown_cm_per_h * 10.0
+
+    def _is_pump_triggered(observed_level_mm: float) -> bool:
+        if derived_pump_threshold_cm is None:
+            return False
+        projected_distance_cm = baseline_cm - (h_start_mm + observed_level_mm) / 10.0
+        return compare_threshold(projected_distance_cm, derived_pump_threshold_cm, sensor.threshold_condition)
 
     free_level = 0.0
     observed_level = 0.0
@@ -1172,16 +1228,19 @@ async def _compute_prediction(
     peak_observed = 0.0
     peak_time = forecast_series[0]["hour_time"] if forecast_series else now_hour
     predicted_series: list[dict[str, Any]] = []
+    pump_scenario_active = False
 
     for item in forecast_series:
         if item["is_gap"]:
             # Gaps advance time decay without adding rainfall pressure.
             free_level = max(0.0, free_level * lambda_decay)
             observed_level = max(0.0, observed_level * lambda_decay)
-            scenario_pump_count = 2 if observed_level > pump_on_rise_mm else 0
+            triggered = _is_pump_triggered(observed_level)
+            scenario_pump_count = configured_pump_count if triggered else 0
             pump_output_mm = 0.0
             if scenario_pump_count > 0:
-                pump_output_mm = q2_mm_per_h
+                pump_scenario_active = True
+                pump_output_mm = drawdown_mm_per_h
                 observed_level = max(0.0, observed_level - pump_output_mm)
             if free_level > peak_free:
                 peak_free = free_level
@@ -1204,10 +1263,12 @@ async def _compute_prediction(
         pressure = _rainfall_pressure_mm(item["rainfall_mm"], model_params)
         free_level = max(0.0, free_level * lambda_decay + pressure)
         observed_level = max(0.0, observed_level * lambda_decay + pressure)
-        scenario_pump_count = 2 if observed_level > pump_on_rise_mm else 0
+        triggered = _is_pump_triggered(observed_level)
+        scenario_pump_count = configured_pump_count if triggered else 0
         pump_output_mm = 0.0
         if scenario_pump_count > 0:
-            pump_output_mm = q2_mm_per_h
+            pump_scenario_active = True
+            pump_output_mm = drawdown_mm_per_h
             observed_level = max(0.0, observed_level - pump_output_mm)
 
         if free_level > peak_free:
@@ -1301,7 +1362,10 @@ async def _compute_prediction(
         "threshold_provenance": threshold_provenance,
         "validated_params": {
             "lambda_decay": model_params.get("lambda_decay"),
-            "pump_on_rise_mm": model_params.get("pump_on_rise_mm"),
+            "pump_trigger_anchor": model_params.get("pump_trigger_anchor"),
+            "pump_trigger_offset_mm": model_params.get("pump_trigger_offset_mm"),
+            "derived_pump_threshold_cm": derived_pump_threshold_cm,
+            "scenario_pump_count": model_params.get("scenario_pump_count"),
             "forecast_gap_ratio_threshold": gap_ratio_threshold,
             "net_drawdown_by_pump_count_cm_per_h": model_params.get("net_drawdown_by_pump_count_cm_per_h"),
             "drawdown_parameter_status": model_params.get("drawdown_parameter_status"),
@@ -1327,7 +1391,10 @@ async def _compute_prediction(
             risk_level=effective_risk,
             predicted_free_rise_mm=predicted_free_rise_mm,
             predicted_observed_rise_mm=predicted_observed_rise_mm,
-            pump_on_rise_mm=pump_on_rise_mm,
+            pump_scenario_active=pump_scenario_active,
+            derived_pump_threshold_cm=derived_pump_threshold_cm,
+            projected_distance_cm=projected_distance_cm,
+            threshold_condition=sensor.threshold_condition,
             actuator_binding_id=profile.actuator_binding_id if profile else None,
             data_status=data_status,
         )
@@ -1349,8 +1416,8 @@ async def _compute_prediction(
         "policy_reason": policy_reason,
         "can_auto_resolve": can_auto_resolve,
         "advisory_only": advisory_only,
-        "scenario_pump_count": 2 if (predicted_observed_rise_mm < predicted_free_rise_mm) else 0,
-        "pump_assumption": "inferred_q2" if (predicted_observed_rise_mm < predicted_free_rise_mm) else "none",
+        "scenario_pump_count": configured_pump_count if pump_scenario_active else 0,
+        "pump_assumption": "inferred_q2" if pump_scenario_active else "none",
         "should_notify": should_notify,
         "horizon_hours": horizon_hours,
         "forecast_issued_at": forecast_issued_at,
