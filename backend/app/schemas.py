@@ -428,14 +428,11 @@ class ForecastPumpParams(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def migrate_legacy_pump_on_rise_mm(cls, values: Any) -> Any:
-        """Migrate legacy pump_params into the anchor/offset/count model.
+        """Migrate legacy pump_on_rise_mm into the anchor/offset/count model.
 
-        pump_on_rise_mm cannot be represented exactly in the new absolute-
-        threshold model, so it is converted to the current safe default:
+        The old "future rise" threshold cannot be represented exactly in the new
+        absolute-threshold model, so it is converted to the current safe default:
         warning anchor, zero offset, two-pump scenario.
-
-        Previous versions also allowed 1 or 3 pumps; q1/q3 are not yet
-        calibrated, so those counts are normalized to 2.
         """
         if not isinstance(values, dict):
             return values
@@ -445,14 +442,15 @@ class ForecastPumpParams(BaseModel):
             values.setdefault("pump_trigger_anchor", "warning")
             values.setdefault("pump_trigger_offset_mm", 0.0)
             values.setdefault("scenario_pump_count", 2)
-        count = values.get("scenario_pump_count")
-        try:
-            count = int(count) if count is not None else 2
-        except (TypeError, ValueError):
-            count = 2
-        if count not in (0, 2):
-            values["scenario_pump_count"] = 2
         return values
+
+    @field_validator("scenario_pump_count", mode="after")
+    @classmethod
+    def validate_scenario_pump_count(cls, value: int) -> int:
+        """Only 0 or 2 are supported until q1 and q3 are measured/calibrated."""
+        if value not in (0, 2):
+            raise ValueError("scenario_pump_count must be 0 or 2 until q1/q3 are calibrated")
+        return value
 
     @field_validator("net_drawdown_by_pump_count_cm_per_h", mode="after")
     @classmethod

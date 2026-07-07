@@ -324,14 +324,11 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _migrate_legacy_pump_params(params: dict[str, Any] | None) -> dict[str, Any]:
-    """Migrate legacy pump_params into the anchor/offset/count model.
+    """Migrate legacy pump_on_rise_mm into the anchor/offset/count model.
 
     This is also done by the Pydantic schema, but the prediction path reads raw
     profile pump_params without re-validating, so the migration must be repeated
     here to keep existing deployments working.
-
-    pump_on_rise_mm is converted to the current safe default. Counts 1 or 3 are
-    normalized to 2 because q1/q3 are not yet calibrated.
     """
     if not params:
         return {}
@@ -341,13 +338,6 @@ def _migrate_legacy_pump_params(params: dict[str, Any] | None) -> dict[str, Any]
         migrated.setdefault("pump_trigger_anchor", "warning")
         migrated.setdefault("pump_trigger_offset_mm", 0.0)
         migrated.setdefault("scenario_pump_count", 2)
-    count = migrated.get("scenario_pump_count")
-    try:
-        count = int(count) if count is not None else 2
-    except (TypeError, ValueError):
-        count = 2
-    if count not in (0, 2):
-        migrated["scenario_pump_count"] = 2
     return migrated
 
 
