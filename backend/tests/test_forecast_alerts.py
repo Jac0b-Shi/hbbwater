@@ -1138,13 +1138,14 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(two.scenario_pump_count, 2)
 
     async def test_upsert_multiple_profiles_persists_all(self):
-        """Saving multiple profiles at once must update every profile without batching.
+        """Saving multiple profiles must flush after each profile, not once at the end.
 
-        This is a regression test for the DM executemany bug where flushing
-        multiple profile updates in a single batch caused an invalid descriptor
-        index error. We now flush after each profile update.
+        This is a regression test for the DM SQLAlchemy driver executemany bug
+        where batching multiple UPDATE statements on forecast_alert_profiles caused
+        an invalid descriptor index error. We wrap session.flush to count calls so
+        the test fails if anyone reverts to a single final flush.
         """
-        async with self.business_session_factory() as session, self.control_session_factory() as control:
+        async with self.business_session_factory() as session:
             await self._seed_station(session, "A5151")
             for sensor_id in ("ultrasonic_001", "ultrasonic_002", "ultrasonic_003"):
                 sensor = Sensor(
@@ -1187,8 +1188,19 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                 for idx, sensor_id in enumerate(("ultrasonic_001", "ultrasonic_002", "ultrasonic_003"))
             ]
 
+            original_flush = session.flush
+            flush_count = 0
+
+            async def counted_flush(*args, **kwargs):
+                nonlocal flush_count
+                flush_count += 1
+                return await original_flush(*args, **kwargs)
+
+            session.flush = counted_flush
             await upsert_forecast_alert_profiles(session, payloads)
             await session.commit()
+
+            self.assertEqual(flush_count, len(payloads))
 
             result = await session.execute(
                 select(ForecastAlertProfile).order_by(ForecastAlertProfile.sensor_id)
