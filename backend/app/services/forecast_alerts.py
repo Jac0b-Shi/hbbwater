@@ -45,6 +45,8 @@ FORECAST_ALERT_HORIZON_KEY = "forecast_alert_default_horizon_hours"
 FORECAST_ALERT_MODEL_PARAMS_KEY = "forecast_alert_model_params"
 MODEL_VERSION = "heuristic_pressure_v1"
 PRIMARY_OBSERVED_STATION = "A5151"
+PRIMARY_STATION_MIN_COVERAGE_RATIO = 0.75
+FALLBACK_MIN_COVERAGE_RATIO = 0.75
 
 SENSOR_CONSISTENCY_MODEL = {
     "reference_sensor_id": "ultrasonic_002",
@@ -54,11 +56,6 @@ SENSOR_CONSISTENCY_MODEL = {
     "median_abs_residual_cm": 0.11,
     "p95_abs_residual_cm": 0.42,
     "calibration_sample_size": 3145,
-}
-
-PROVISIONAL_VERTICAL_THRESHOLDS_CM = {
-    "ultrasonic_002": {"warning_level_cm": 81.2, "danger_level_cm": 70.6},
-    "ultrasonic_003": {"warning_level_cm": 70.6, "danger_level_cm": 60.0},
 }
 
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
@@ -170,11 +167,14 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
             drawdown[pump_count] = default_drawdown.get(pump_count)
         value = drawdown[pump_count]
         if value is not None and not isinstance(value, (int, float)):
-            drawdown[pump_count] = default_drawdown.get(pump_count)
-        if pump_count == "0" and drawdown[pump_count] != 0:
-            drawdown[pump_count] = 0.0
+            value = default_drawdown.get(pump_count)
+            drawdown[pump_count] = value
+        if pump_count == "0" and value != 0:
+            value = 0.0
+            drawdown[pump_count] = value
         if value is not None and value < 0:
-            drawdown[pump_count] = default_drawdown.get(pump_count)
+            value = default_drawdown.get(pump_count)
+            drawdown[pump_count] = value
     # Adjacent non-null values must be strictly increasing.
     qs = [drawdown.get(str(i)) for i in range(1, 4)]
     non_null = [(i, q) for i, q in enumerate(qs, start=1) if q is not None]
@@ -391,6 +391,96 @@ async def _latest_sensor_reading(
     }
 
 
+async def _readings_for_interpolation(
+    db: AsyncSession,
+    sensor_id: str,
+    *,
+    common_time: datetime,
+    window_seconds: int = 900,
+) -> list[SensorReading]:
+    """Return readings that bracket common_time within the requested window."""
+    start_time = common_time - timedelta(seconds=window_seconds)
+    end_time = common_time + timedelta(seconds=window_seconds)
+    return (
+        await db.execute(
+            select(SensorReading)
+            .where(SensorReading.sensor_id == sensor_id)
+            .where(SensorReading.water_level.is_not(None))
+            .where(SensorReading.recorded_at >= start_time)
+            .where(SensorReading.recorded_at <= end_time)
+            .order_by(SensorReading.recorded_at)
+        )
+    ).scalars().all()
+
+
+def _interpolate_to_time(
+    readings: list[SensorReading],
+    target_time: datetime,
+    window_seconds: int = 900,
+) -> float | None:
+    """Linearly interpolate water_level to target_time from two bracketing readings.
+
+    If target_time equals a reading time exactly, return that reading.
+    If target_time is bracketed, interpolate.
+    Otherwise, fall back to the nearest reading if it lies within the window.
+    """
+    if not readings:
+        return None
+
+    exact = next((r for r in readings if r.recorded_at == target_time and r.water_level is not None), None)
+    if exact is not None:
+        return float(exact.water_level)
+
+    before = [r for r in readings if r.recorded_at <= target_time and r.water_level is not None]
+    after = [r for r in readings if r.recorded_at > target_time and r.water_level is not None]
+    if before and after:
+        left = max(before, key=lambda r: r.recorded_at)
+        right = min(after, key=lambda r: r.recorded_at)
+        left_level = float(left.water_level)
+        right_level = float(right.water_level)
+        total_seconds = (right.recorded_at - left.recorded_at).total_seconds()
+        if total_seconds <= 0:
+            return left_level
+        elapsed = (target_time - left.recorded_at).total_seconds()
+        ratio = elapsed / total_seconds
+        return left_level + ratio * (right_level - left_level)
+
+    # Fallback: nearest reading within the window.
+    nearest = min(
+        (r for r in readings if r.water_level is not None),
+        key=lambda r: abs((r.recorded_at - target_time).total_seconds()),
+        default=None,
+    )
+    if nearest is None:
+        return None
+    delta = abs((nearest.recorded_at - target_time).total_seconds())
+    if delta <= window_seconds:
+        return float(nearest.water_level)
+    return None
+
+
+async def _forecast_coverage(
+    db: AsyncSession,
+    station_id: str | None,
+    *,
+    now_hour: datetime,
+    horizon_hours: int,
+) -> tuple[float, int]:
+    """Return coverage ratio and count for a station over the prediction window."""
+    if station_id is None:
+        return 0.0, 0
+    end_time = now_hour + timedelta(hours=horizon_hours)
+    count = await db.scalar(
+        select(func.count())
+        .select_from(RainfallForecastHourly)
+        .where(RainfallForecastHourly.station_id == station_id)
+        .where(RainfallForecastHourly.hour_time >= now_hour)
+        .where(RainfallForecastHourly.hour_time < end_time)
+    )
+    expected = max(horizon_hours, 1)
+    return (count / expected), count
+
+
 async def _select_rain_source(
     db: AsyncSession,
     requested_station_id: str | None,
@@ -398,11 +488,11 @@ async def _select_rain_source(
     now_hour: datetime,
     horizon_hours: int,
 ) -> dict[str, Any]:
-    """Choose observed and forecast rainfall sources independently.
+    """Choose observed and forecast rainfall sources by coverage.
 
-    Observed rainfall is fixed to A5151 when possible. Forecast rainfall
-    falls back to 58362 only when A5151 has no forecast data, and the
-    downgrade is explicitly flagged.
+    A5151 is preferred for forecast rainfall only when it has enough coverage
+    (>= PRIMARY_STATION_MIN_COVERAGE_RATIO). Otherwise a fallback station is used
+    if it meets FALLBACK_MIN_COVERAGE_RATIO. Degrades are explicitly flagged.
     """
     actual_station_id = PRIMARY_OBSERVED_STATION
 
@@ -421,7 +511,6 @@ async def _select_rain_source(
             "degraded_reason": None,
         }
 
-    # If A5151 is not an active station, observed source is degraded.
     active_station_ids = {s.station_id for s in stations}
     if PRIMARY_OBSERVED_STATION not in active_station_ids:
         actual_station_id = next(
@@ -431,35 +520,47 @@ async def _select_rain_source(
 
     end_time = now_hour + timedelta(hours=horizon_hours)
 
-    # A5151 is the forced-priority forecast source. The profile's requested station
-    # (e.g. 58362) may only be used as an explicit fallback when A5151 is missing.
-    candidate_station_ids = [PRIMARY_OBSERVED_STATION]
+    primary_ratio, primary_count = await _forecast_coverage(
+        db, PRIMARY_OBSERVED_STATION, now_hour=now_hour, horizon_hours=horizon_hours
+    )
+
+    if primary_ratio >= PRIMARY_STATION_MIN_COVERAGE_RATIO:
+        return {
+            "actual_station_id": actual_station_id,
+            "forecast_station_id": PRIMARY_OBSERVED_STATION,
+            "rain_source_degraded": False,
+            "degraded_reason": None,
+        }
+
+    # Primary coverage is insufficient; look for a fallback in preference order.
+    candidate_station_ids = []
     if requested_station_id and requested_station_id != PRIMARY_OBSERVED_STATION:
         candidate_station_ids.append(requested_station_id)
     for station in stations:
-        if station.station_id not in candidate_station_ids:
+        if station.station_id not in (PRIMARY_OBSERVED_STATION, *candidate_station_ids):
             candidate_station_ids.append(station.station_id)
 
-    forecast_station_id = None
     fallback_station_id = None
     for station_id in candidate_station_ids:
-        count = await db.scalar(
-            select(func.count())
-            .select_from(RainfallForecastHourly)
-            .where(RainfallForecastHourly.station_id == station_id)
-            .where(RainfallForecastHourly.hour_time >= now_hour)
-            .where(RainfallForecastHourly.hour_time < end_time)
+        ratio, _count = await _forecast_coverage(
+            db, station_id, now_hour=now_hour, horizon_hours=horizon_hours
         )
-        if count:
-            forecast_station_id = station_id
+        if ratio >= FALLBACK_MIN_COVERAGE_RATIO:
+            fallback_station_id = station_id
             break
 
-    rain_source_degraded = forecast_station_id != PRIMARY_OBSERVED_STATION
+    rain_source_degraded = fallback_station_id is not None
     degraded_reason = None
-    if forecast_station_id is None:
+    if fallback_station_id is None and primary_count == 0:
         degraded_reason = "NO_FORECAST_AVAILABLE"
-    elif rain_source_degraded:
+    elif fallback_station_id is None:
+        degraded_reason = "A5151_COVERAGE_INSUFFICIENT"
+    elif primary_count == 0:
         degraded_reason = "A5151_FORECAST_MISSING"
+    else:
+        degraded_reason = "A5151_COVERAGE_INSUFFICIENT"
+
+    forecast_station_id = fallback_station_id
 
     return {
         "actual_station_id": actual_station_id,
@@ -646,55 +747,103 @@ async def _sensor_consistency_diagnosis(
     """Compute 002->003 affine mapping residual for Shadow Mode diagnosis only.
 
     This result is purely diagnostic and must not be used to suppress hazard alerts.
+    Readings are linearly interpolated to a common time so that asynchronous sampling
+    does not produce false residuals during rapid water level changes.
     """
     reference = await _latest_sensor_reading(db, reference_sensor_id, now=now)
     target = await _latest_sensor_reading(db, target_sensor_id, now=now)
     if reference is None or target is None:
         return None
 
-    reference_level = _to_float(reference["reading"].water_level, None)
-    target_level = _to_float(target["reading"].water_level, None)
+    reference_recorded_at = reference["reading"].recorded_at
+    target_recorded_at = target["reading"].recorded_at
+    common_time = min(reference_recorded_at, target_recorded_at)
+
+    reference_readings = await _readings_for_interpolation(
+        db, reference_sensor_id, common_time=common_time
+    )
+    target_readings = await _readings_for_interpolation(
+        db, target_sensor_id, common_time=common_time
+    )
+
+    reference_level = _interpolate_to_time(reference_readings, common_time)
+    target_level = _interpolate_to_time(target_readings, common_time)
     if reference_level is None or target_level is None:
         return None
+
+    alignment_delta_seconds = int(
+        abs((reference_recorded_at - target_recorded_at).total_seconds())
+    )
 
     model = SENSOR_CONSISTENCY_MODEL
     expected_target = model["slope"] * reference_level + model["intercept_cm"]
     residual = target_level - expected_target
+    abs_residual = abs(residual)
+
+    reference_stale = bool(reference["is_stale"])
+    target_stale = bool(target["is_stale"])
+
+    if reference_stale or target_stale or alignment_delta_seconds > 300:
+        alignment_status = "unavailable"
+        residual = None
+        abs_residual = None
+    elif alignment_delta_seconds > 120:
+        alignment_status = "degraded"
+    else:
+        alignment_status = "aligned"
+
+    effective_p95 = model["p95_abs_residual_cm"]
+    if alignment_status == "degraded":
+        effective_p95 = effective_p95 * 2.5
+
+    if abs_residual is None:
+        instantaneous_consistency = "unknown"
+    elif abs_residual <= model["median_abs_residual_cm"]:
+        instantaneous_consistency = "normal"
+    elif abs_residual <= effective_p95:
+        instantaneous_consistency = "warning"
+    else:
+        instantaneous_consistency = "conflict"
+
     return {
         "reference_sensor_id": reference_sensor_id,
         "target_sensor_id": target_sensor_id,
+        "reference_recorded_at": reference_recorded_at.isoformat(),
+        "target_recorded_at": target_recorded_at.isoformat(),
+        "alignment_delta_seconds": alignment_delta_seconds,
+        "alignment_status": alignment_status,
         "reference_level_cm": round(reference_level, 2),
         "target_level_cm": round(target_level, 2),
         "expected_target_cm": round(expected_target, 2),
-        "residual_cm": round(residual, 2),
+        "residual_cm": round(residual, 2) if residual is not None else None,
         "median_abs_residual_cm": model["median_abs_residual_cm"],
         "p95_abs_residual_cm": model["p95_abs_residual_cm"],
         "calibration_sample_size": model["calibration_sample_size"],
+        "reference_stale": reference_stale,
+        "target_stale": target_stale,
+        "sensor_health": "unknown",
+        "instantaneous_consistency": instantaneous_consistency,
+        "consecutive_violation_count": 0,
         "diagnostic_only": True,
     }
 
 
 def _threshold_provenance(sensor: Sensor) -> dict[str, Any]:
-    """Mark whether the configured thresholds are provisional vertical-install assumptions."""
-    warning = _to_float(sensor.warning_level, None)
-    danger = _to_float(sensor.danger_level, None)
-    provisional = PROVISIONAL_VERTICAL_THRESHOLDS_CM.get(sensor.sensor_id)
-    if provisional is None:
-        return {
-            "provisional_vertical_assumption": False,
-            "reason": "No known provisional threshold mapping for this sensor.",
-        }
-    warning_match = warning is not None and abs(warning - provisional["warning_level_cm"]) < 0.05
-    danger_match = danger is not None and abs(danger - provisional["danger_level_cm"]) < 0.05
+    """Return threshold metadata configured for the sensor.
+
+    Thresholds (warning_level/danger_level/threshold_condition) are the only
+    source of truth for alert logic; this provenance block only describes how
+    those thresholds should be interpreted by operators.
+    """
+    status = (sensor.threshold_status or "unknown").strip().lower() if sensor.threshold_status else "unknown"
+    if status not in ("provisional", "empirical", "surveyed", "approved"):
+        status = "unknown"
     return {
-        "provisional_vertical_assumption": warning_match and danger_match,
-        "reason": (
-            "Thresholds match the first-overflow vertical-install assumption; not final PLC setpoints."
-            if (warning_match and danger_match)
-            else "Configured thresholds do not match the provisional vertical assumption."
-        ),
-        "expected_warning_cm": provisional["warning_level_cm"],
-        "expected_danger_cm": provisional["danger_level_cm"],
+        "threshold_status": status,
+        "threshold_source": sensor.threshold_source,
+        "threshold_version": sensor.threshold_version,
+        "threshold_updated_at": sensor.threshold_updated_at.isoformat() if sensor.threshold_updated_at else None,
+        "threshold_note": sensor.threshold_note,
     }
 
 
@@ -1028,6 +1177,7 @@ async def _compute_prediction(
             predicted_observed_rise_mm=predicted_observed_rise_mm,
             pump_on_rise_mm=pump_on_rise_mm,
             actuator_binding_id=profile.actuator_binding_id if profile else None,
+            data_status=data_status,
         )
     )
 

@@ -337,9 +337,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_sensor_consistency_diagnosis_is_shadow_mode_only(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
             await self._seed_station(session, "A5151")
-            await self._seed_sensor(session)
-            # Add a companion sensor 003 reading so consistency diagnosis can run.
-            now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            sensor, reading, _profile = await self._seed_sensor(session)
+            # Add a companion sensor 003 reading at the same time so alignment is exact.
+            now = reading.recorded_at
             sensor_003 = Sensor(
                 sensor_id="ultrasonic_003",
                 sensor_type="ultrasonic",
@@ -354,9 +354,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             reading_003 = SensorReading(
                 sensor_id="ultrasonic_003",
                 sensor_type="ultrasonic",
-                water_level=Decimal("85.0"),
+                water_level=Decimal("89.14"),
                 status="normal",
-                recorded_at=now_hour,
+                recorded_at=now,
             )
             session.add_all([sensor_003, reading_003])
             await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
@@ -370,13 +370,23 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             diagnosis = features.get("sensor_consistency_diagnosis")
             self.assertIsNotNone(diagnosis)
             self.assertTrue(diagnosis.get("diagnostic_only"))
+            self.assertEqual(diagnosis.get("alignment_status"), "aligned")
+            self.assertEqual(diagnosis.get("alignment_delta_seconds"), 0)
+            self.assertEqual(diagnosis.get("sensor_health"), "unknown")
+            self.assertIn(diagnosis.get("instantaneous_consistency"), {"normal", "warning"})
             # Must not affect risk conclusion.
             self.assertEqual(result.risk_level, "normal")
 
-    async def test_provisional_vertical_thresholds_are_recorded(self):
+    async def test_threshold_metadata_is_recorded(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
             await self._seed_station(session, "A5151")
-            await self._seed_sensor(session, baseline=Decimal("100"), latest=Decimal("100"), warning=Decimal("81.2"), danger=Decimal("70.6"))
+            sensor, _reading, _profile = await self._seed_sensor(
+                session, baseline=Decimal("100"), latest=Decimal("100"), warning=Decimal("90.0"), danger=Decimal("81.2")
+            )
+            sensor.threshold_status = "provisional"
+            sensor.threshold_source = "field_measurement"
+            sensor.threshold_version = "2026-07-v1"
+            sensor.threshold_note = "danger 为首次越堤线；声轴姿态尚未完成测量"
             await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
             await session.commit()
 
@@ -387,8 +397,167 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             features = result.features or {}
             provenance = features.get("threshold_provenance")
             self.assertIsNotNone(provenance)
-            self.assertTrue(provenance.get("provisional_vertical_assumption"))
-            self.assertIn("not final PLC setpoints", provenance.get("reason", ""))
+            self.assertEqual(provenance.get("threshold_status"), "provisional")
+            self.assertEqual(provenance.get("threshold_source"), "field_measurement")
+            self.assertEqual(provenance.get("threshold_version"), "2026-07-v1")
+            self.assertIn("首次越堤线", provenance.get("threshold_note", ""))
+
+    async def test_sensor_consistency_async_sampling(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, reading, _profile = await self._seed_sensor(session)
+            base_time = reading.recorded_at
+            # Reference level 100.0 cm predicts target level 89.14 cm.
+            reference_level = Decimal("100.0")
+            expected_target = 0.9840 * float(reference_level) - 9.26
+            sensor_003 = Sensor(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                location="D楼3号",
+                warning_level=Decimal("70.6"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                water_level_baseline=Decimal("80"),
+                normal_interval=300,
+                is_active=True,
+            )
+            reading_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal(str(round(expected_target, 2))),
+                status="normal",
+                recorded_at=base_time,
+            )
+            reading.water_level = reference_level
+            session.add_all([sensor_003, reading_003])
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            # Same time: aligned.
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            result = run.results[0]
+            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            self.assertEqual(diagnosis.get("alignment_status"), "aligned")
+            self.assertEqual(diagnosis.get("alignment_delta_seconds"), 0)
+            self.assertIsNotNone(diagnosis.get("residual_cm"))
+            self.assertLess(abs(diagnosis.get("residual_cm")), 0.1)
+
+            # 2-minute offset: still aligned.
+            reading_003.recorded_at = base_time + timedelta(seconds=120)
+            await session.commit()
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            result = run.results[0]
+            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            self.assertEqual(diagnosis.get("alignment_status"), "aligned")
+            self.assertEqual(diagnosis.get("alignment_delta_seconds"), 120)
+            self.assertIsNotNone(diagnosis.get("residual_cm"))
+
+            # 5-minute offset: degraded (relaxed tolerance).
+            reading_003.recorded_at = base_time + timedelta(seconds=300)
+            await session.commit()
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            result = run.results[0]
+            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            self.assertEqual(diagnosis.get("alignment_status"), "degraded")
+            self.assertEqual(diagnosis.get("alignment_delta_seconds"), 300)
+            self.assertIsNotNone(diagnosis.get("residual_cm"))
+
+            # 6-minute offset: no consistency conclusion.
+            reading_003.recorded_at = base_time + timedelta(seconds=360)
+            await session.commit()
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            result = run.results[0]
+            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            self.assertEqual(diagnosis.get("alignment_status"), "unavailable")
+            self.assertIsNone(diagnosis.get("residual_cm"))
+
+            # Rapid water level change: target samples at base_time + 60s and +300s
+            # bracket the reference sample at base_time + 180s. Without interpolation,
+            # either target sample would show a ~0.6 cm residual; interpolation to the
+            # common time cancels the change and keeps the residual near zero.
+            reading_003.recorded_at = base_time + timedelta(seconds=60)
+            reading_003.water_level = Decimal(str(round(expected_target - 0.6, 2)))
+            later_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal(str(round(expected_target + 0.6, 2))),
+                status="normal",
+                recorded_at=base_time + timedelta(seconds=300),
+            )
+            reference_mid = SensorReading(
+                sensor_id="ultrasonic_002",
+                sensor_type="ultrasonic",
+                water_level=reference_level,
+                status="normal",
+                recorded_at=base_time + timedelta(seconds=180),
+            )
+            session.add_all([later_003, reference_mid])
+            await session.commit()
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            result = run.results[0]
+            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            self.assertEqual(diagnosis.get("alignment_status"), "aligned")
+            # Interpolation to the common time (base_time + 180s) should cancel the drift.
+            self.assertLess(abs(diagnosis.get("residual_cm")), 0.1)
+
+    async def test_a5151_coverage_downgrade_to_backup(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_station(session, "58362", role="backup")
+            await self._seed_sensor(session)
+            now_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            # A5151 only has 1/6 hours, below 75% coverage. 58362 is complete.
+            session.add(RainfallForecastHourly(
+                station_id="A5151",
+                hour_time=now_hour,
+                rainfall_mm=Decimal("5"),
+                batch_time=now_hour,
+                forecast_issued_at=now_hour,
+            ))
+            for i in range(6):
+                session.add(RainfallForecastHourly(
+                    station_id="58362",
+                    hour_time=now_hour + timedelta(hours=i),
+                    rainfall_mm=Decimal("0"),
+                    batch_time=now_hour,
+                    forecast_issued_at=now_hour,
+                ))
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertEqual(result.forecast_station_id, "58362")
+            self.assertTrue(result.rain_source_degraded)
+            self.assertEqual(result.degraded_reason, "A5151_COVERAGE_INSUFFICIENT")
+
+    async def test_non_numeric_drawdown_value_is_sanitized(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            _sensor, _reading, profile = await self._seed_sensor(session)
+            profile.model_params = {
+                "net_drawdown_by_pump_count_cm_per_h": {
+                    "0": 0.0,
+                    "1": None,
+                    "2": "not a number",
+                    "3": None,
+                },
+            }
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            features = result.features or {}
+            validated = features.get("validated_params", {})
+            drawdown = validated.get("net_drawdown_by_pump_count_cm_per_h", {})
+            # Non-numeric q2 should be replaced by the default.
+            self.assertEqual(drawdown.get("2"), 6.23)
+            self.assertEqual(result.data_status, "available")
+            self.assertEqual(result.risk_level, "normal")
 
     async def test_a5151_forced_priority_over_profile_station_id(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
@@ -411,6 +580,26 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             # A5151 must be forced priority even when the profile asks for 58362.
             self.assertEqual(result.forecast_station_id, "A5151")
             self.assertFalse(result.rain_source_degraded)
+
+    async def test_degraded_data_returns_hold_manual_review(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, reading, _profile = await self._seed_sensor(session)
+            # Make the reading stale so data_status becomes degraded.
+            reading.recorded_at = datetime.utcnow() - timedelta(seconds=sensor.normal_interval * 3)
+            await self._seed_forecast(session, "A5151", [20, 20, 20, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertEqual(result.data_status, "degraded")
+            self.assertEqual(result.effective_risk, "unknown")
+            recommendation = result.control_recommendation or {}
+            self.assertEqual(recommendation.get("action"), "hold_manual_review")
+            self.assertEqual(recommendation.get("reason"), "DATA_DEGRADED")
+            self.assertFalse(recommendation.get("executable"))
 
     async def test_degraded_data_does_not_auto_resolve_active_alert(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:

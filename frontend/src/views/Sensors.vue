@@ -263,6 +263,34 @@
           <el-form-item label="危险水位(cm)">
             <el-input-number v-model="sensorForm.danger_level" :min="0" :max="500" />
           </el-form-item>
+          <el-form-item label="阈值来源状态">
+            <el-select v-model="sensorForm.threshold_status" style="width: 180px">
+              <el-option
+                v-for="option in thresholdStatusOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+            <span class="form-hint">说明当前阈值是临时标定、经验值还是已审批</span>
+          </el-form-item>
+          <el-form-item label="阈值来源">
+            <el-input v-model="sensorForm.threshold_source" placeholder="如: field_measurement" />
+          </el-form-item>
+          <el-form-item label="阈值版本">
+            <el-input v-model="sensorForm.threshold_version" placeholder="如: 2026-07-v1" />
+          </el-form-item>
+          <el-form-item label="阈值更新时间">
+            <el-date-picker
+              v-model="sensorForm.threshold_updated_at"
+              type="datetime"
+              placeholder="选择时间"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+            />
+          </el-form-item>
+          <el-form-item label="阈值备注">
+            <el-input v-model="sensorForm.threshold_note" type="textarea" rows="2" placeholder="如: danger 为首次越堤线；声轴姿态尚未完成测量" />
+          </el-form-item>
         </template>
         <el-form-item label="正常上报间隔">
           <el-input-number v-model="sensorForm.normal_interval" :min="60" :step="60" />
@@ -323,6 +351,11 @@ const sensorForm = ref({
   warning_level: 30,
   danger_level: 50,
   threshold_condition: 'greater_or_equal',
+  threshold_status: 'unknown',
+  threshold_source: '',
+  threshold_version: '',
+  threshold_updated_at: null,
+  threshold_note: '',
   measurement_unit: 'cm',
   normal_interval: 1800,
   alert_interval: 300,
@@ -359,6 +392,13 @@ const sensorDialogWidth = computed(() => isMobile.value ? 'calc(100vw - 24px)' :
 const thresholdConditionOptions = [
   { value: 'greater_or_equal', label: '大于等于阈值触发' },
   { value: 'less_or_equal', label: '小于等于阈值触发' },
+]
+const thresholdStatusOptions = [
+  { value: 'unknown', label: '未知' },
+  { value: 'provisional', label: '临时' },
+  { value: 'empirical', label: '经验' },
+  { value: 'surveyed', label: '测量' },
+  { value: 'approved', label: '已审批' },
 ]
 const measurementUnitOptions = [
   { value: 'cm', label: '厘米 (cm)' },
@@ -465,6 +505,11 @@ const resetSensorForm = () => {
     warning_level: 30,
     danger_level: 50,
     threshold_condition: 'greater_or_equal',
+    threshold_status: 'unknown',
+    threshold_source: '',
+    threshold_version: '',
+    threshold_updated_at: null,
+    threshold_note: '',
     measurement_unit: 'cm',
     normal_interval: 1800,
     alert_interval: 300,
@@ -532,6 +577,11 @@ const openSensorDialog = (group = null, sensor = null) => {
       warning_level: sensor.warning_level,
       danger_level: sensor.danger_level,
       threshold_condition: sensor.threshold_condition || 'greater_or_equal',
+      threshold_status: sensor.threshold_status || 'unknown',
+      threshold_source: sensor.threshold_source || '',
+      threshold_version: sensor.threshold_version || '',
+      threshold_updated_at: sensor.threshold_updated_at || null,
+      threshold_note: sensor.threshold_note || '',
       measurement_unit: sensor.measurement_unit || 'cm',
       normal_interval: sensor.normal_interval,
       alert_interval: sensor.alert_interval,
@@ -594,6 +644,15 @@ const saveSensor = async () => {
       )
       return
     }
+  }
+  // Normalize empty optional metadata fields to null.
+  for (const key of ['threshold_source', 'threshold_version', 'threshold_note']) {
+    if (payload[key] === '') {
+      payload[key] = null
+    }
+  }
+  if (payload.threshold_status === 'unknown') {
+    payload.threshold_status = null
   }
   if (selectedGroup.value) {
     payload.webhook_group_id = selectedGroup.value.id

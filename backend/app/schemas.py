@@ -32,6 +32,11 @@ class SensorBase(BaseModel):
     warning_level: Optional[Decimal] = None
     danger_level: Optional[Decimal] = None
     threshold_condition: str = Field(default="greater_or_equal", pattern="^(greater_or_equal|less_or_equal)$")
+    threshold_status: Optional[str] = Field(default=None, pattern="^(provisional|empirical|surveyed|approved|unknown)$")
+    threshold_source: Optional[str] = Field(None, max_length=100)
+    threshold_version: Optional[str] = Field(None, max_length=50)
+    threshold_updated_at: Optional[datetime] = None
+    threshold_note: Optional[str] = None
     measurement_unit: str = Field(default="cm", pattern="^(cm|mm)$")
     water_level_baseline: Optional[Decimal] = Field(None, ge=0)
     map_x: Optional[Decimal] = Field(None, ge=0, le=100)
@@ -68,6 +73,11 @@ class SensorUpdate(BaseModel):
     warning_level: Optional[Decimal] = None
     danger_level: Optional[Decimal] = None
     threshold_condition: Optional[str] = Field(None, pattern="^(greater_or_equal|less_or_equal)$")
+    threshold_status: Optional[str] = Field(default=None, pattern="^(provisional|empirical|surveyed|approved|unknown)$")
+    threshold_source: Optional[str] = Field(None, max_length=100)
+    threshold_version: Optional[str] = Field(None, max_length=50)
+    threshold_updated_at: Optional[datetime] = None
+    threshold_note: Optional[str] = None
     measurement_unit: Optional[str] = Field(None, pattern="^(cm|mm)$")
     water_level_baseline: Optional[Decimal] = Field(None, ge=0)
     map_x: Optional[Decimal] = Field(None, ge=0, le=100)

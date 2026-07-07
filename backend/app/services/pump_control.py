@@ -12,6 +12,7 @@ class PumpControlContext:
     predicted_observed_rise_mm: float
     pump_on_rise_mm: float
     actuator_binding_id: str | None = None
+    data_status: str = "available"
 
 
 class PumpController(Protocol):
@@ -25,6 +26,16 @@ class NoopPumpController:
     """Default controller used until a concrete hardware channel is approved."""
 
     async def build_recommendation(self, context: PumpControlContext) -> dict[str, Any]:
+        if context.data_status != "available" or context.risk_level == "unknown":
+            return {
+                "mode": "recommendation_only",
+                "executable": False,
+                "adapter": "noop",
+                "action": "hold_manual_review",
+                "sensor_id": context.sensor_id,
+                "actuator_binding_id": context.actuator_binding_id,
+                "reason": "DATA_DEGRADED",
+            }
         should_prepare = (
             context.risk_level in {"warning", "critical"}
             or context.predicted_free_rise_mm >= context.pump_on_rise_mm
