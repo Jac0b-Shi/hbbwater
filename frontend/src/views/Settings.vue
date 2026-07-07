@@ -757,8 +757,27 @@ const syncBusinessDatabaseState = (payload) => {
 }
 
 const toNumberOrNull = (value) => {
+  if (value === null || value === undefined || value === '') return null
   const number = Number(value)
   return Number.isFinite(number) ? number : null
+}
+
+const getPumpStringParam = (profile, key, fallback) => {
+  const value = profile.pump_params?.[key]
+  return typeof value === 'string' ? value : fallback
+}
+
+const getPumpParam = (profile, key, fallback) => {
+  const value = profile.pump_params?.[key]
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+const getNetDrawdown = (profile, pumpCount, fallback) => {
+  const table = profile.pump_params?.net_drawdown_by_pump_count_cm_per_h
+  const value = table?.[pumpCount]
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
 }
 
 const parseJsonObject = (value) => {
