@@ -67,6 +67,18 @@ DEFAULT_SENSOR_CONSISTENCY_MODELS: list[dict[str, Any]] = [
 SENSOR_CONSISTENCY_MODELS_KEY = "sensor_consistency_models"
 
 
+def _validate_unique_sensor_consistency_pairs(models: list[dict[str, Any]]) -> None:
+    seen_pairs: set[tuple[str, str]] = set()
+    for index, model in enumerate(models):
+        pair = tuple(sorted((model["reference_sensor_id"], model["target_sensor_id"])))
+        if pair in seen_pairs:
+            raise ValueError(
+                f"sensor_consistency_models[{index}] duplicates an existing sensor pair; "
+                "reverse direction is not allowed"
+            )
+        seen_pairs.add(pair)
+
+
 async def _get_sensor_consistency_models(control_db: AsyncSession) -> list[dict[str, Any]]:
     """Load configured sensor consistency models.
 
@@ -101,6 +113,7 @@ async def _get_sensor_consistency_models(control_db: AsyncSession) -> list[dict[
         if model.is_enabled:
             validated.append(model.model_dump())
 
+    _validate_unique_sensor_consistency_pairs(validated)
     return validated
 
 
@@ -297,7 +310,48 @@ async def get_forecast_alert_global_config(control_db: AsyncSession) -> dict[str
     return config
 
 
-async def save_forecast_alert_global_config(control_db: AsyncSession, config: dict[str, Any]) -> None:
+async def _validate_sensor_consistency_model_sensors(
+    db: AsyncSession,
+    models: list[dict[str, Any]],
+) -> None:
+    sensor_ids = {
+        sensor_id
+        for model in models
+        for sensor_id in (model["reference_sensor_id"], model["target_sensor_id"])
+    }
+    if not sensor_ids:
+        return
+
+    result = await db.execute(
+        select(Sensor.sensor_id, Sensor.sensor_type)
+        .where(Sensor.sensor_id.in_(sensor_ids))
+    )
+    sensor_types = {row.sensor_id: row.sensor_type for row in result}
+    missing = sorted(sensor_ids - set(sensor_types))
+    if missing:
+        raise ValueError(
+            "sensor_consistency_models references missing sensor(s): "
+            + ", ".join(missing)
+        )
+
+    non_ultrasonic = sorted(
+        sensor_id
+        for sensor_id, sensor_type in sensor_types.items()
+        if sensor_type != SensorType.ULTRASONIC.value
+    )
+    if non_ultrasonic:
+        raise ValueError(
+            "sensor_consistency_models must reference ultrasonic sensors only: "
+            + ", ".join(non_ultrasonic)
+        )
+
+
+async def save_forecast_alert_global_config(
+    control_db: AsyncSession,
+    config: dict[str, Any],
+    *,
+    db: AsyncSession | None = None,
+) -> None:
     from app.schemas import SensorConsistencyModelConfig
 
     if "enabled" in config:
@@ -337,6 +391,10 @@ async def save_forecast_alert_global_config(control_db: AsyncSession, config: di
             except Exception as exc:
                 raise ValueError(f"sensor_consistency_models[{index}] is invalid: {exc}") from exc
             validated.append(model.model_dump())
+        _validate_unique_sensor_consistency_pairs(validated)
+        if db is None:
+            raise ValueError("business database session is required to validate sensor_consistency_models")
+        await _validate_sensor_consistency_model_sensors(db, validated)
         await set_config_value(
             control_db,
             SENSOR_CONSISTENCY_MODELS_KEY,
@@ -1046,7 +1104,6 @@ async def _compute_prediction(
                 "can_auto_resolve": False,
                 "advisory_only": True,
                 "sensor_consistency_diagnoses": sensor_consistency_diagnoses,
-                "sensor_consistency_diagnoses": consistency_diagnoses,
                 "threshold_provenance": threshold_provenance,
             },
             "series": [],

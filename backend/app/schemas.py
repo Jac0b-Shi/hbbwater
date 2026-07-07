@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Union
 from decimal import Decimal
+import math
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -465,17 +466,33 @@ class ForecastModelParams(BaseModel):
 
 
 class SensorConsistencyModelConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
     reference_sensor_id: str = Field(..., max_length=50)
     target_sensor_id: str = Field(..., max_length=50)
-    slope: float = Field(...)
-    intercept_cm: float = Field(...)
-    normal_abs_residual_cm: float = Field(default=0.5, gt=0)
-    warning_abs_residual_cm: float = Field(default=1.0, gt=0)
-    median_abs_residual_cm: Optional[float] = None
-    p95_abs_residual_cm: Optional[float] = None
-    calibration_sample_size: Optional[int] = None
+    slope: float = Field(..., allow_inf_nan=False)
+    intercept_cm: float = Field(..., allow_inf_nan=False)
+    normal_abs_residual_cm: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    warning_abs_residual_cm: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    median_abs_residual_cm: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+    p95_abs_residual_cm: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+    calibration_sample_size: Optional[int] = Field(None, ge=0)
     calibration_version: Optional[str] = Field(None, max_length=50)
     is_enabled: bool = True
+
+    @field_validator(
+        "slope",
+        "intercept_cm",
+        "normal_abs_residual_cm",
+        "warning_abs_residual_cm",
+        "median_abs_residual_cm",
+        "p95_abs_residual_cm",
+    )
+    @classmethod
+    def validate_finite_number(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("numeric values must be finite")
+        return value
 
     @model_validator(mode="after")
     def validate_model(self):
@@ -492,6 +509,18 @@ class ForecastAlertGlobalConfig(BaseModel):
     default_horizon_hours: int = Field(default=6, ge=1, le=24)
     model_params: Dict[str, Any] = Field(default_factory=dict)
     sensor_consistency_models: List[SensorConsistencyModelConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_sensor_consistency_pairs(self):
+        seen_pairs: set[tuple[str, str]] = set()
+        for model in self.sensor_consistency_models:
+            pair = tuple(sorted((model.reference_sensor_id, model.target_sensor_id)))
+            if pair in seen_pairs:
+                raise ValueError(
+                    "duplicate sensor consistency pair is not allowed, including reverse direction"
+                )
+            seen_pairs.add(pair)
+        return self
 
     @field_validator("model_params")
     @classmethod

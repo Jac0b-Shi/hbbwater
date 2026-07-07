@@ -31,6 +31,7 @@ CREATE TABLE forecast_prediction_runs (
     completed_at TIMESTAMP,
     created_by VARCHAR(50),
     source CLOB,
+    diagnostics CLOB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

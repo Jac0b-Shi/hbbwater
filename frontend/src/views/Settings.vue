@@ -150,6 +150,18 @@
             class="mb-4"
           />
 
+          <div class="forecast-guide mb-4">
+            <strong>使用说明</strong>
+            <ul>
+              <li>模型参数保持 <code>{}</code> 时使用系统默认值；不确定含义时优先只改下方每个传感器的窗口、预警上涨量和危险上涨量。</li>
+              <li>默认预测窗口表示向后评估多少小时；冷却时间表示同一传感器同级别预报告警的最短重复通知间隔。</li>
+              <li>两泵净降深是正常“两台泵运行”时的水位下降能力估计，报告建议值约为 <code>6.23 cm/h</code>。</li>
+            </ul>
+            <div class="forecast-guide-example">
+              可选 JSON 示例：<code>{"lambda_decay":0.97,"forecast_gap_ratio_threshold":0.25}</code>
+            </div>
+          </div>
+
           <el-form :model="forecastGlobalConfig" :label-width="isMobile ? 'auto' : '150px'" :label-position="isMobile ? 'top' : 'right'">
             <el-form-item label="启用预报告警">
               <el-switch v-model="forecastGlobalConfig.enabled" />
@@ -1130,6 +1142,42 @@ onMounted(async () => {
 
 .forecast-profile-table {
   margin-top: 12px;
+}
+
+.forecast-guide {
+  padding: 12px 14px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #fbfcff;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.forecast-guide strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #303133;
+  font-size: 14px;
+}
+
+.forecast-guide ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.forecast-guide code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #f0f2f5;
+  color: #303133;
+  font-family: Consolas, Monaco, monospace;
+  overflow-wrap: anywhere;
+}
+
+.forecast-guide-example {
+  margin-top: 6px;
+  color: #909399;
 }
 
 .station-cell {

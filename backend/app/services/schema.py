@@ -1,12 +1,13 @@
 """Lightweight schema alignment for deployments without migrations."""
 from datetime import datetime
 
-from sqlalchemy import DECIMAL, Integer, String, bindparam, column, inspect, select, table, text, update
+from sqlalchemy import DECIMAL, JSON, DateTime, Integer, String, Text, bindparam, column, inspect, select, table, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.models import (
     ForecastAlertProfile,
+    JSONText,
     ForecastPredictionResult,
     ForecastPredictionRun,
     RainfallActualHourly,
@@ -41,18 +42,20 @@ async def _table_exists(conn: AsyncConnection, table_name: str) -> bool:
 
 
 async def _column_exists(conn: AsyncConnection, table_name: str, column_name: str) -> bool:
+    expected = column_name.lower()
     return await conn.run_sync(
         lambda sync_conn: any(
-            column["name"] == column_name
+            column["name"].lower() == expected
             for column in inspect(sync_conn).get_columns(table_name)
         )
     )
 
 
 async def _index_exists(conn: AsyncConnection, table_name: str, index_name: str) -> bool:
+    expected = index_name.lower()
     return await conn.run_sync(
         lambda sync_conn: any(
-            index["name"] == index_name
+            index["name"].lower() == expected
             for index in inspect(sync_conn).get_indexes(table_name)
         )
     )
@@ -69,9 +72,8 @@ def _is_duplicate_index_error(exc: DBAPIError) -> bool:
 
 
 async def _list_existing_tables(conn: AsyncConnection) -> set[str]:
-    return set(
-        await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
-    )
+    table_names = await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
+    return {table_name.lower() for table_name in table_names}
 
 
 def _build_add_column_sql(
@@ -235,6 +237,28 @@ async def _ensure_forecast_alert_tables(conn: AsyncConnection) -> None:
         await conn.run_sync(lambda sync_conn: ForecastPredictionRun.__table__.create(sync_conn, checkfirst=True))
     if not await _table_exists(conn, "forecast_prediction_results"):
         await conn.run_sync(lambda sync_conn: ForecastPredictionResult.__table__.create(sync_conn, checkfirst=True))
+
+
+def _forecast_run_diagnostics_column_type(conn: AsyncConnection):
+    if conn.dialect.name == "mysql":
+        return JSON()
+    return JSONText()
+
+
+async def _ensure_forecast_prediction_run_columns(conn: AsyncConnection) -> None:
+    if not await _table_exists(conn, "forecast_prediction_runs"):
+        return
+    if not await _column_exists(conn, "forecast_prediction_runs", "diagnostics"):
+        await conn.execute(
+            text(
+                _build_add_column_sql(
+                    conn,
+                    "forecast_prediction_runs",
+                    "diagnostics",
+                    _forecast_run_diagnostics_column_type(conn),
+                )
+            )
+        )
 
 
 async def _ensure_mysql_forecast_alert_enum(conn: AsyncConnection) -> None:
@@ -439,6 +463,7 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
         await _ensure_weather_tables(conn)
         await _ensure_forecast_alert_tables(conn)
 
+    await _ensure_forecast_prediction_run_columns(conn)
     await _ensure_mysql_forecast_alert_enum(conn)
     await _backfill_split_rainfall_tables(conn)
     await _ensure_default_weather_stations(conn)
@@ -453,6 +478,16 @@ async def ensure_runtime_schema(conn: AsyncConnection, dialect_name: str) -> Non
         await conn.execute(text(_build_add_column_sql(conn, "sensors", "device_imei", String(32))))
     if not await _column_exists(conn, "sensors", "threshold_condition"):
         await conn.execute(text(_build_add_column_sql(conn, "sensors", "threshold_condition", String(32))))
+    if not await _column_exists(conn, "sensors", "threshold_status"):
+        await conn.execute(text(_build_add_column_sql(conn, "sensors", "threshold_status", String(32))))
+    if not await _column_exists(conn, "sensors", "threshold_source"):
+        await conn.execute(text(_build_add_column_sql(conn, "sensors", "threshold_source", String(100))))
+    if not await _column_exists(conn, "sensors", "threshold_version"):
+        await conn.execute(text(_build_add_column_sql(conn, "sensors", "threshold_version", String(50))))
+    if not await _column_exists(conn, "sensors", "threshold_updated_at"):
+        await conn.execute(text(_build_add_column_sql(conn, "sensors", "threshold_updated_at", DateTime())))
+    if not await _column_exists(conn, "sensors", "threshold_note"):
+        await conn.execute(text(_build_add_column_sql(conn, "sensors", "threshold_note", Text())))
     if not await _column_exists(conn, "sensors", "measurement_unit"):
         await conn.execute(text(_build_add_column_sql(conn, "sensors", "measurement_unit", String(8))))
     if not await _column_exists(conn, "sensors", "water_level_baseline"):

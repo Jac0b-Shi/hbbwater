@@ -15,7 +15,7 @@ if BACKEND_ROOT not in sys.path:
 IMPORT_ERROR = None
 
 try:
-    from sqlalchemy import select
+    from sqlalchemy import inspect, select, text
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.database import BusinessBase
@@ -153,6 +153,94 @@ class SchemaAlignmentTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
             self.assertIsNotNone(actual.id)
             self.assertIsNotNone(forecast.id)
+
+    async def test_ensure_runtime_schema_adds_forecast_run_diagnostics_column(self):
+        async with self.engine.begin() as conn:
+            await conn.execute(text("DROP TABLE forecast_prediction_results"))
+            await conn.execute(text("DROP TABLE forecast_prediction_runs"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE forecast_prediction_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trigger_type VARCHAR(20) NOT NULL DEFAULT 'manual',
+                        dry_run BOOLEAN DEFAULT 1,
+                        status VARCHAR(20) NOT NULL DEFAULT 'completed',
+                        message TEXT,
+                        forecast_issued_at DATETIME,
+                        started_at DATETIME,
+                        completed_at DATETIME,
+                        created_by VARCHAR(50),
+                        source TEXT,
+                        created_at DATETIME
+                    )
+                    """
+                )
+            )
+
+        async with self.engine.begin() as conn:
+            await ensure_runtime_schema(conn, "sqlite")
+            column_names = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"]
+                    for column in inspect(sync_conn).get_columns("forecast_prediction_runs")
+                }
+            )
+            self.assertIn("diagnostics", column_names)
+
+        async with self.session_factory() as session:
+            forecast_run = ForecastPredictionRun(
+                trigger_type="manual",
+                dry_run=True,
+                status="completed",
+                diagnostics=[{"reference_sensor_id": "ultrasonic_002"}],
+            )
+            session.add(forecast_run)
+            await session.commit()
+            await session.refresh(forecast_run)
+            self.assertEqual(
+                forecast_run.diagnostics,
+                [{"reference_sensor_id": "ultrasonic_002"}],
+            )
+
+    async def test_ensure_runtime_schema_adds_sensor_threshold_metadata_columns(self):
+        legacy_columns = (
+            "threshold_status",
+            "threshold_source",
+            "threshold_version",
+            "threshold_updated_at",
+            "threshold_note",
+        )
+        async with self.engine.begin() as conn:
+            for column_name in legacy_columns:
+                await conn.execute(text(f"ALTER TABLE sensors DROP COLUMN {column_name}"))
+
+        async with self.engine.begin() as conn:
+            await ensure_runtime_schema(conn, "sqlite")
+            column_names = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"]
+                    for column in inspect(sync_conn).get_columns("sensors")
+                }
+            )
+            for column_name in legacy_columns:
+                self.assertIn(column_name, column_names)
+
+        async with self.session_factory() as session:
+            sensor = Sensor(
+                sensor_id="threshold_meta_sensor",
+                sensor_type="ultrasonic",
+                location="Threshold metadata test",
+                threshold_status="provisional",
+                threshold_source="field_measurement",
+                threshold_version="2026-07-v1",
+                threshold_updated_at=datetime(2026, 7, 7, 4, 0),
+                threshold_note="schema alignment regression",
+            )
+            session.add(sensor)
+            await session.commit()
+            await session.refresh(sensor)
+            self.assertEqual(sensor.threshold_status, "provisional")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Regression tests for forecast-driven water level alerts."""
+import json
 import os
 import sys
 import tempfile
@@ -34,9 +35,11 @@ try:
     from app.services.forecast_alerts import (
         FORECAST_ALERT_ENABLED_KEY,
         evaluate_forecast_alerts,
+        save_forecast_alert_global_config,
         upsert_forecast_alert_profiles,
     )
     from app.services.system_config import set_config_value
+    from app.schemas import ForecastAlertGlobalConfig, SensorConsistencyModelConfig
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
     IMPORT_ERROR = exc
 
@@ -442,7 +445,6 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     "is_enabled": True,
                 }
             ]
-            import json
             await set_config_value(control, "sensor_consistency_models", json.dumps(custom_config))
             await control.commit()
 
@@ -489,7 +491,6 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     "is_enabled": False,
                 }
             ]
-            import json
             await set_config_value(control, "sensor_consistency_models", json.dumps(disabled_config))
             await control.commit()
 
@@ -510,7 +511,6 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     "intercept_cm": -9.26,
                 }
             ]
-            import json
             await set_config_value(control, "sensor_consistency_models", json.dumps(invalid_config))
             await control.commit()
 
@@ -518,6 +518,86 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError) as ctx:
                 await _get_sensor_consistency_models(control)
             self.assertIn("reference_sensor_id", str(ctx.exception).lower())
+
+    async def test_sensor_consistency_config_rejects_extra_nonfinite_and_duplicate_pairs(self):
+        base = {
+            "reference_sensor_id": "ultrasonic_002",
+            "target_sensor_id": "ultrasonic_003",
+            "slope": 0.9840,
+            "intercept_cm": -9.26,
+        }
+        with self.assertRaises(Exception):
+            SensorConsistencyModelConfig.model_validate({**base, "unexpected": True})
+        with self.assertRaises(Exception):
+            SensorConsistencyModelConfig.model_validate({**base, "slope": float("inf")})
+        with self.assertRaises(Exception):
+            SensorConsistencyModelConfig.model_validate({**base, "median_abs_residual_cm": -0.1})
+        with self.assertRaises(Exception):
+            SensorConsistencyModelConfig.model_validate({**base, "calibration_sample_size": -1})
+        with self.assertRaises(Exception):
+            ForecastAlertGlobalConfig(
+                sensor_consistency_models=[
+                    base,
+                    {
+                        "reference_sensor_id": "ultrasonic_003",
+                        "target_sensor_id": "ultrasonic_002",
+                        "slope": 1.0,
+                        "intercept_cm": 0.0,
+                    },
+                ]
+            )
+
+    async def test_sensor_consistency_config_requires_existing_ultrasonic_sensors(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            session.add_all(
+                [
+                    Sensor(
+                        sensor_id="ultrasonic_002",
+                        sensor_type="ultrasonic",
+                        location="D楼",
+                        is_active=True,
+                    ),
+                    Sensor(
+                        sensor_id="immersion_001",
+                        sensor_type="immersion",
+                        location="低洼点",
+                        is_active=True,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            with self.assertRaisesRegex(ValueError, "missing sensor"):
+                await save_forecast_alert_global_config(
+                    control,
+                    {
+                        "sensor_consistency_models": [
+                            {
+                                "reference_sensor_id": "ultrasonic_002",
+                                "target_sensor_id": "missing_003",
+                                "slope": 0.9840,
+                                "intercept_cm": -9.26,
+                            }
+                        ]
+                    },
+                    db=session,
+                )
+
+            with self.assertRaisesRegex(ValueError, "ultrasonic sensors only"):
+                await save_forecast_alert_global_config(
+                    control,
+                    {
+                        "sensor_consistency_models": [
+                            {
+                                "reference_sensor_id": "ultrasonic_002",
+                                "target_sensor_id": "immersion_001",
+                                "slope": 0.9840,
+                                "intercept_cm": -9.26,
+                            }
+                        ]
+                    },
+                    db=session,
+                )
 
     async def test_sensor_consistency_run_diagnostics_store_all_models(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
@@ -589,6 +669,53 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                         result.sensor_id,
                         [diagnosis.get("reference_sensor_id"), diagnosis.get("target_sensor_id")],
                     )
+
+    async def test_unavailable_sensor_filters_unrelated_consistency_diagnoses(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor_002, reading_002, _profile = await self._seed_sensor(session)
+            sensor_003 = Sensor(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                location="D楼3号",
+                warning_level=Decimal("70.6"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                water_level_baseline=Decimal("80"),
+                normal_interval=300,
+                is_active=True,
+            )
+            reading_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal("89.14"),
+                status="normal",
+                recorded_at=reading_002.recorded_at,
+            )
+            unavailable_sensor = Sensor(
+                sensor_id="ultrasonic_004",
+                sensor_type="ultrasonic",
+                location="无读数点位",
+                warning_level=Decimal("70.0"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                normal_interval=300,
+                is_active=True,
+            )
+            session.add_all([sensor_003, reading_003, unavailable_sensor])
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            self.assertTrue(run.diagnostics)
+            self.assertEqual(run.diagnostics[0].get("reference_sensor_id"), "ultrasonic_002")
+            self.assertEqual(run.diagnostics[0].get("target_sensor_id"), "ultrasonic_003")
+            results_by_sensor = {result.sensor_id: result for result in run.results}
+            result = results_by_sensor["ultrasonic_004"]
+            self.assertEqual(result.data_status, "unavailable")
+            self.assertEqual(result.features.get("sensor_consistency_diagnoses"), [])
 
     async def test_sensor_consistency_async_sampling(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:

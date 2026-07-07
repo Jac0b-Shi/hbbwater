@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS forecast_prediction_runs (
     completed_at TIMESTAMP NULL DEFAULT NULL,
     created_by VARCHAR(50) DEFAULT NULL,
     source JSON,
+    diagnostics JSON COMMENT '运行级完整诊断信息',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_forecast_run_started (started_at),
     INDEX idx_forecast_run_status (status),

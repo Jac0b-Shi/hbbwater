@@ -37,6 +37,11 @@ CREATE TABLE sensors (
     warning_level DECIMAL(10,2),
     danger_level DECIMAL(10,2),
     threshold_condition VARCHAR(32) DEFAULT 'greater_or_equal',
+    threshold_status VARCHAR(32),
+    threshold_source VARCHAR(100),
+    threshold_version VARCHAR(50),
+    threshold_updated_at TIMESTAMP,
+    threshold_note CLOB,
     measurement_unit VARCHAR(8) DEFAULT 'cm',
     water_level_baseline DECIMAL(10,2),
     map_x DECIMAL(6,3),
@@ -284,6 +289,7 @@ CREATE TABLE forecast_prediction_runs (
     completed_at TIMESTAMP,
     created_by VARCHAR(50),
     source CLOB,
+    diagnostics CLOB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
