@@ -1137,6 +1137,73 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
         two = ForecastPumpParams(scenario_pump_count=2)
         self.assertEqual(two.scenario_pump_count, 2)
 
+    async def test_upsert_multiple_profiles_persists_all(self):
+        """Saving multiple profiles at once must update every profile without batching.
+
+        This is a regression test for the DM executemany bug where flushing
+        multiple profile updates in a single batch caused an invalid descriptor
+        index error. We now flush after each profile update.
+        """
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            for sensor_id in ("ultrasonic_001", "ultrasonic_002", "ultrasonic_003"):
+                sensor = Sensor(
+                    sensor_id=sensor_id,
+                    sensor_type="ultrasonic",
+                    location="D楼",
+                    warning_level=Decimal("95"),
+                    danger_level=Decimal("90"),
+                    threshold_condition="less_or_equal",
+                    water_level_baseline=Decimal("100"),
+                    normal_interval=300,
+                    is_active=True,
+                )
+                profile = ForecastAlertProfile(
+                    sensor_id=sensor_id,
+                    is_enabled=False,
+                    horizon_hours=6,
+                )
+                session.add_all([sensor, profile])
+            await session.commit()
+
+            payloads = [
+                {
+                    "sensor_id": sensor_id,
+                    "is_enabled": True,
+                    "station_id": "A5151",
+                    "horizon_hours": 8,
+                    "warning_rise_mm": 10 + idx,
+                    "critical_rise_mm": 20 + idx,
+                    "model_params": None,
+                    "pump_params": {
+                        "pump_trigger_anchor": "warning",
+                        "pump_trigger_offset_mm": idx,
+                        "scenario_pump_count": 2,
+                        "net_drawdown_by_pump_count_cm_per_h": {"0": 0, "1": None, "2": 6.23, "3": None},
+                        "drawdown_parameter_status": {"0": "defined", "1": "unknown", "2": "inferred", "3": "unknown"},
+                    },
+                    "actuator_binding_id": None,
+                }
+                for idx, sensor_id in enumerate(("ultrasonic_001", "ultrasonic_002", "ultrasonic_003"))
+            ]
+
+            await upsert_forecast_alert_profiles(session, payloads)
+            await session.commit()
+
+            result = await session.execute(
+                select(ForecastAlertProfile).order_by(ForecastAlertProfile.sensor_id)
+            )
+            profiles = {p.sensor_id: p for p in result.scalars().all()}
+            self.assertEqual(len(profiles), 3)
+            for idx, sensor_id in enumerate(("ultrasonic_001", "ultrasonic_002", "ultrasonic_003")):
+                profile = profiles[sensor_id]
+                self.assertTrue(profile.is_enabled)
+                self.assertEqual(profile.horizon_hours, 8)
+                self.assertEqual(profile.warning_rise_mm, 10 + idx)
+                self.assertEqual(profile.critical_rise_mm, 20 + idx)
+                self.assertEqual(profile.station_id, "A5151")
+                self.assertEqual(profile.pump_params["pump_trigger_offset_mm"], idx)
+
     async def test_greater_or_equal_pump_threshold_direction(self):
         """For greater_or_equal, the derived threshold is below the anchor level."""
         from app.services.forecast_alerts import _derived_pump_threshold_cm

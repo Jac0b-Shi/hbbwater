@@ -784,15 +784,16 @@ const parseJsonObject = (value) => {
   if (value == null || typeof value === 'object') {
     return value || {}
   }
+  let parsed
   try {
-    const parsed = JSON.parse(value)
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-      throw new Error('模型参数必须是 JSON 对象')
-    }
-    return parsed
+    parsed = JSON.parse(value)
   } catch {
     throw new Error('模型参数 JSON 格式错误，请检查后再保存')
   }
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new Error('模型参数必须是 JSON 对象')
+  }
+  return parsed
 }
 
 const applyForecastConfig = (payload) => {

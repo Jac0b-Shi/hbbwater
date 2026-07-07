@@ -567,8 +567,6 @@ async def upsert_forecast_alert_profiles(
         # updating multiple rows in a single batch.
         await db.flush()
 
-    await db.flush()
-
 
 async def _latest_sensor_reading(
     db: AsyncSession,
