@@ -563,6 +563,10 @@ async def upsert_forecast_alert_profiles(
         profile.actuator_binding_id = payload.get("actuator_binding_id") or None
         profile.updated_at = datetime.utcnow()
 
+        # Flush per profile to avoid DM SQLAlchemy executemany issues when
+        # updating multiple rows in a single batch.
+        await db.flush()
+
     await db.flush()
 
 

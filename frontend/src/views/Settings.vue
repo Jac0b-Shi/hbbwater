@@ -781,11 +781,17 @@ const getNetDrawdown = (profile, pumpCount, fallback) => {
 }
 
 const parseJsonObject = (value) => {
-  if (value == null || typeof value === 'object') return value || {}
+  if (value == null || typeof value === 'object') {
+    return value || {}
+  }
   try {
-    return JSON.parse(value) || {}
+    const parsed = JSON.parse(value)
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      throw new Error('模型参数必须是 JSON 对象')
+    }
+    return parsed
   } catch {
-    return {}
+    throw new Error('模型参数 JSON 格式错误，请检查后再保存')
   }
 }
 
