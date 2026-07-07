@@ -309,11 +309,33 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
     return validated
 
 
+def _migrate_legacy_pump_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Convert legacy pump_on_rise_mm into the anchor/offset/count model.
+
+    This is also done by the Pydantic schema, but the prediction path reads raw
+    profile pump_params without re-validating, so the migration must be repeated
+    here to keep existing deployments working.
+    """
+    if not params:
+        return {}
+    migrated = dict(params)
+    if "pump_on_rise_mm" in migrated:
+        migrated.pop("pump_on_rise_mm", None)
+        migrated.setdefault("pump_trigger_anchor", "warning")
+        migrated.setdefault("pump_trigger_offset_mm", 0.0)
+        migrated.setdefault("scenario_pump_count", 2)
+    return migrated
+
+
 def _merge_params(*items: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_MODEL_PARAMS)
-    for item in items:
-        if item:
-            merged.update(item)
+    for index, item in enumerate(items):
+        if not item:
+            continue
+        # The third item is profile.pump_params, which may contain legacy pump_on_rise_mm.
+        if index == 2:
+            item = _migrate_legacy_pump_params(item)
+        merged.update(item)
     return _validate_model_params(merged)
 
 
@@ -1207,20 +1229,34 @@ async def _compute_prediction(
 
     derived_pump_threshold_cm = _derived_pump_threshold_cm(sensor, model_params)
     configured_pump_count = int(model_params.get("scenario_pump_count", DEFAULT_MODEL_PARAMS["scenario_pump_count"]))
+    configured_pump_assumption = model_params.get("pump_assumption") or DEFAULT_MODEL_PARAMS["pump_assumption"]
+
     drawdown_mm_per_h = 0.0
+    pump_assumption_for_scenario: str | None = None
     if configured_pump_count > 0:
         drawdown_cm_per_h = _drawdown_for_pump_count(model_params, configured_pump_count)
-        if drawdown_cm_per_h is None and configured_pump_count != 2:
-            drawdown_cm_per_h = _drawdown_for_pump_count(model_params, 2)
         if drawdown_cm_per_h is None:
-            drawdown_cm_per_h = 6.23
-        drawdown_mm_per_h = drawdown_cm_per_h * 10.0
+            # Unknown drawdown for the selected count: do not run the scenario.
+            configured_pump_count = 0
+        else:
+            drawdown_mm_per_h = drawdown_cm_per_h * 10.0
+            if configured_pump_count == 2:
+                pump_assumption_for_scenario = configured_pump_assumption
+            else:
+                pump_assumption_for_scenario = f"inferred_q{configured_pump_count}"
 
     def _is_pump_triggered(observed_level_mm: float) -> bool:
-        if derived_pump_threshold_cm is None:
+        if derived_pump_threshold_cm is None or configured_pump_count == 0:
             return False
         projected_distance_cm = baseline_cm - (h_start_mm + observed_level_mm) / 10.0
         return compare_threshold(projected_distance_cm, derived_pump_threshold_cm, sensor.threshold_condition)
+
+    def _pump_assumption_for_count(count: int) -> str:
+        if count == 0:
+            return "none"
+        if pump_assumption_for_scenario is not None:
+            return pump_assumption_for_scenario
+        return configured_pump_assumption
 
     free_level = 0.0
     observed_level = 0.0
@@ -1235,11 +1271,11 @@ async def _compute_prediction(
             # Gaps advance time decay without adding rainfall pressure.
             free_level = max(0.0, free_level * lambda_decay)
             observed_level = max(0.0, observed_level * lambda_decay)
-            triggered = _is_pump_triggered(observed_level)
-            scenario_pump_count = configured_pump_count if triggered else 0
+            if not pump_scenario_active:
+                pump_scenario_active = _is_pump_triggered(observed_level)
+            scenario_pump_count = configured_pump_count if pump_scenario_active else 0
             pump_output_mm = 0.0
             if scenario_pump_count > 0:
-                pump_scenario_active = True
                 pump_output_mm = drawdown_mm_per_h
                 observed_level = max(0.0, observed_level - pump_output_mm)
             if free_level > peak_free:
@@ -1253,7 +1289,7 @@ async def _compute_prediction(
                 "free_rise_mm": round(free_level, 2),
                 "observed_rise_mm": round(observed_level, 2),
                 "scenario_pump_count": scenario_pump_count,
-                "pump_assumption": "inferred_q2" if scenario_pump_count > 0 else "none",
+                "pump_assumption": _pump_assumption_for_count(scenario_pump_count),
                 "actual_pump_state": "unknown",
                 "pump_output_mm": round(pump_output_mm, 2),
                 "is_gap": True,
@@ -1263,11 +1299,11 @@ async def _compute_prediction(
         pressure = _rainfall_pressure_mm(item["rainfall_mm"], model_params)
         free_level = max(0.0, free_level * lambda_decay + pressure)
         observed_level = max(0.0, observed_level * lambda_decay + pressure)
-        triggered = _is_pump_triggered(observed_level)
-        scenario_pump_count = configured_pump_count if triggered else 0
+        if not pump_scenario_active:
+            pump_scenario_active = _is_pump_triggered(observed_level)
+        scenario_pump_count = configured_pump_count if pump_scenario_active else 0
         pump_output_mm = 0.0
         if scenario_pump_count > 0:
-            pump_scenario_active = True
             pump_output_mm = drawdown_mm_per_h
             observed_level = max(0.0, observed_level - pump_output_mm)
 
@@ -1282,7 +1318,7 @@ async def _compute_prediction(
             "free_rise_mm": round(free_level, 2),
             "observed_rise_mm": round(observed_level, 2),
             "scenario_pump_count": scenario_pump_count,
-            "pump_assumption": "inferred_q2" if scenario_pump_count > 0 else "none",
+            "pump_assumption": _pump_assumption_for_count(scenario_pump_count),
             "actual_pump_state": "unknown",
             "pump_output_mm": round(pump_output_mm, 2),
         })
@@ -1417,7 +1453,7 @@ async def _compute_prediction(
         "can_auto_resolve": can_auto_resolve,
         "advisory_only": advisory_only,
         "scenario_pump_count": configured_pump_count if pump_scenario_active else 0,
-        "pump_assumption": "inferred_q2" if pump_scenario_active else "none",
+        "pump_assumption": _pump_assumption_for_count(configured_pump_count if pump_scenario_active else 0),
         "should_notify": should_notify,
         "horizon_hours": horizon_hours,
         "forecast_issued_at": forecast_issued_at,

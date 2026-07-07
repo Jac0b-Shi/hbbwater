@@ -1056,8 +1056,8 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     "critical_rise_mm": None,
                     "model_params": None,
                     "pump_params": {
-                        "pump_trigger_anchor": "warning",
-                        "pump_trigger_offset_mm": 0,
+                        "pump_trigger_anchor": "danger",
+                        "pump_trigger_offset_mm": 50,
                         "scenario_pump_count": 2,
                         "net_drawdown_by_pump_count_cm_per_h": {
                             "0": 0,
@@ -1079,9 +1079,45 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
 
         pump_params = payload.profiles[0].pump_params
         self.assertIsNotNone(pump_params)
-        self.assertEqual(pump_params.pump_trigger_anchor, "warning")
-        self.assertEqual(pump_params.pump_trigger_offset_mm, 0)
+        self.assertEqual(pump_params.pump_trigger_anchor, "danger")
+        self.assertEqual(pump_params.pump_trigger_offset_mm, 50)
         self.assertEqual(pump_params.scenario_pump_count, 2)
+
+    async def test_legacy_pump_on_rise_mm_is_migrated(self):
+        """Old pump_params with pump_on_rise_mm must be accepted and migrated."""
+        from app.schemas import ForecastPumpParams
+
+        migrated = ForecastPumpParams.model_validate({
+            "pump_on_rise_mm": 50,
+            "net_drawdown_by_pump_count_cm_per_h": {
+                "0": 0,
+                "1": None,
+                "2": 6.23,
+                "3": None,
+            },
+            "drawdown_parameter_status": {
+                "0": "defined",
+                "1": "unknown",
+                "2": "inferred",
+                "3": "unknown",
+            },
+        })
+        self.assertEqual(migrated.pump_trigger_anchor, "warning")
+        self.assertEqual(migrated.pump_trigger_offset_mm, 0)
+        self.assertEqual(migrated.scenario_pump_count, 2)
+
+    async def test_scenario_pump_count_must_be_zero_or_two(self):
+        """Until q1/q3 are calibrated, only 0 or 2 pumps are valid."""
+        from app.schemas import ForecastPumpParams
+
+        for invalid in (1, 3):
+            with self.assertRaises(ValueError):
+                ForecastPumpParams(scenario_pump_count=invalid)
+
+        zero = ForecastPumpParams(scenario_pump_count=0)
+        self.assertEqual(zero.scenario_pump_count, 0)
+        two = ForecastPumpParams(scenario_pump_count=2)
+        self.assertEqual(two.scenario_pump_count, 2)
 
     async def test_pump_scenario_triggered_by_sensor_warning_level(self):
         """Pump scenario should activate when projected distance reaches warning level."""
@@ -1134,34 +1170,31 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             active_steps = [s for s in series if s.get("scenario_pump_count")]
             self.assertTrue(active_steps)
 
-    async def test_pump_scenario_offset_anchors_to_danger(self):
-        """Offset from danger should activate before danger level is reached."""
+    async def test_pump_scenario_holds_to_end_once_triggered(self):
+        """Once the pump scenario triggers, it should remain active for the rest of the window."""
         async with self.business_session_factory() as session, self.control_session_factory() as control:
             await self._seed_station(session, "A5151")
-            # danger=90cm, warning=95cm, baseline=100cm, latest=100cm
-            sensor, _reading, profile = await self._seed_sensor(
+            sensor, _reading, _profile = await self._seed_sensor(
                 session, baseline=Decimal("100"), latest=Decimal("100"),
                 warning=Decimal("95"), danger=Decimal("90")
             )
-            profile.pump_params = {
-                "pump_trigger_anchor": "danger",
-                "pump_trigger_offset_mm": 50,
-                "scenario_pump_count": 2,
-                "net_drawdown_by_pump_count_cm_per_h": {"0": 0, "1": None, "2": 6.23, "3": None},
-                "drawdown_parameter_status": {"0": "defined", "1": "unknown", "2": "inferred", "3": "unknown"},
-            }
-            # Derived threshold = danger + 50mm = 95cm, same as warning line.
-            await self._seed_forecast(session, "A5151", [20, 20, 20, 0, 0, 0])
+            # Heavy rain first two hours, then stops. Without hold logic the scenario would switch off.
+            await self._seed_forecast(session, "A5151", [25, 25, 0, 0, 0, 0])
             await session.commit()
 
             run = await evaluate_forecast_alerts(session, control, dry_run=True)
             await session.commit()
 
             result = run.results[0]
-            features = result.features or {}
-            self.assertEqual(features.get("validated_params", {}).get("derived_pump_threshold_cm"), 95.0)
             series = result.series or []
             self.assertTrue(any(s.get("scenario_pump_count") for s in series))
+            # Once triggered, every subsequent hour must remain active (no on-off chatter).
+            triggered = False
+            for step in series:
+                if step.get("scenario_pump_count"):
+                    triggered = True
+                if triggered:
+                    self.assertGreater(step.get("scenario_pump_count", 0), 0)
 
 
 if __name__ == "__main__":

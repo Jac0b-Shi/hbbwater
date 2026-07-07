@@ -425,6 +425,33 @@ class ForecastPumpParams(BaseModel):
     )
     calibration_version: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_pump_on_rise_mm(cls, values: Any) -> Any:
+        """Convert legacy pump_on_rise_mm into the anchor/offset/count model.
+
+        Old configs stored a single "future rise" threshold. We now anchor the
+        scenario to the sensor's warning line with zero offset and two pumps,
+        which matches the previous behaviour for less_or_equal sensors.
+        """
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        if "pump_on_rise_mm" in values:
+            values.pop("pump_on_rise_mm", None)
+            values.setdefault("pump_trigger_anchor", "warning")
+            values.setdefault("pump_trigger_offset_mm", 0.0)
+            values.setdefault("scenario_pump_count", 2)
+        return values
+
+    @field_validator("scenario_pump_count", mode="after")
+    @classmethod
+    def restrict_scenario_pump_count(cls, value: int) -> int:
+        """Only 0 or 2 are supported until q1 and q3 are measured/calibrated."""
+        if value not in (0, 2):
+            raise ValueError("scenario_pump_count must be 0 or 2 until q1/q3 are calibrated")
+        return value
+
     @field_validator("net_drawdown_by_pump_count_cm_per_h", mode="after")
     @classmethod
     def validate_drawdown_table(cls, v: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
