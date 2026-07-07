@@ -414,6 +414,7 @@ class ForecastPumpParams(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    pump_on_rise_mm: float = Field(default=50.0, ge=0, allow_inf_nan=False)
     net_drawdown_by_pump_count_cm_per_h: Dict[str, Optional[float]] = Field(
         default_factory=lambda: {"0": 0.0, "1": None, "2": 6.23, "3": None},
     )

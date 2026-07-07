@@ -1036,6 +1036,49 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
 
+    async def test_forecast_config_accepts_frontend_pump_threshold_payload(self):
+        from app.schemas import ForecastAlertConfigUpdate
+
+        payload = ForecastAlertConfigUpdate.model_validate({
+            "global_config": {
+                "enabled": True,
+                "default_horizon_hours": 6,
+                "cooldown_minutes": 120,
+                "model_params": {},
+            },
+            "profiles": [
+                {
+                    "sensor_id": "ultrasonic_002",
+                    "is_enabled": True,
+                    "station_id": None,
+                    "horizon_hours": 6,
+                    "warning_rise_mm": None,
+                    "critical_rise_mm": None,
+                    "model_params": None,
+                    "pump_params": {
+                        "pump_on_rise_mm": 50,
+                        "net_drawdown_by_pump_count_cm_per_h": {
+                            "0": 0,
+                            "1": None,
+                            "2": 6.23,
+                            "3": None,
+                        },
+                        "drawdown_parameter_status": {
+                            "0": "defined",
+                            "1": "unknown",
+                            "2": "inferred",
+                            "3": "unknown",
+                        },
+                    },
+                    "actuator_binding_id": None,
+                }
+            ],
+        })
+
+        pump_params = payload.profiles[0].pump_params
+        self.assertIsNotNone(pump_params)
+        self.assertEqual(pump_params.pump_on_rise_mm, 50)
+
 
 if __name__ == "__main__":
     unittest.main()

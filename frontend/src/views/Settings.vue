@@ -627,8 +627,23 @@ const runtimeDatabaseTarget = computed(() => {
 })
 const forecastStations = computed(() => forecastAlertStore.config?.stations || [])
 
+const formatValidationDetail = (detail) => {
+  if (!Array.isArray(detail)) {
+    if (typeof detail === 'string') return detail
+    if (detail && typeof detail === 'object') {
+      return detail.msg || detail.message || JSON.stringify(detail)
+    }
+    return String(detail)
+  }
+  return detail.map(item => {
+    if (!item || typeof item !== 'object') return String(item)
+    const loc = Array.isArray(item.loc) ? item.loc.join('.') : item.loc
+    return loc ? `${loc}: ${item.msg || JSON.stringify(item)}` : (item.msg || JSON.stringify(item))
+  }).join('；')
+}
+
 const getErrorMessage = (error) => {
-  if (error.response?.data?.detail) return error.response.data.detail
+  if (error.response?.data?.detail) return formatValidationDetail(error.response.data.detail)
   if (error.response?.data?.message) return error.response.data.message
   if (typeof error.response?.data === 'string') return error.response.data
   if (error.response?.data) return JSON.stringify(error.response.data)
