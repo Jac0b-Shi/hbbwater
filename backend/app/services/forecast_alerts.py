@@ -48,15 +48,47 @@ PRIMARY_OBSERVED_STATION = "A5151"
 PRIMARY_STATION_MIN_COVERAGE_RATIO = 0.75
 FALLBACK_MIN_COVERAGE_RATIO = 0.75
 
-SENSOR_CONSISTENCY_MODEL = {
-    "reference_sensor_id": "ultrasonic_002",
-    "target_sensor_id": "ultrasonic_003",
-    "slope": 0.9840,
-    "intercept_cm": -9.26,
-    "median_abs_residual_cm": 0.11,
-    "p95_abs_residual_cm": 0.42,
-    "calibration_sample_size": 3145,
-}
+DEFAULT_SENSOR_CONSISTENCY_MODELS: list[dict[str, Any]] = [
+    {
+        "reference_sensor_id": "ultrasonic_002",
+        "target_sensor_id": "ultrasonic_003",
+        "slope": 0.9840,
+        "intercept_cm": -9.26,
+        "normal_abs_residual_cm": 0.5,
+        "warning_abs_residual_cm": 1.0,
+        "conflict_abs_residual_cm": 1.5,
+        "median_abs_residual_cm": 0.11,
+        "p95_abs_residual_cm": 0.42,
+        "calibration_sample_size": 3145,
+        "calibration_version": "20260706-v1",
+        "is_enabled": True,
+    },
+]
+
+SENSOR_CONSISTENCY_MODELS_KEY = "sensor_consistency_models"
+
+
+async def _get_sensor_consistency_models(control_db: AsyncSession) -> list[dict[str, Any]]:
+    """Load configured sensor consistency models, falling back to defaults."""
+    raw = await get_config_value(control_db, SENSOR_CONSISTENCY_MODELS_KEY, default="")
+    if not raw:
+        return [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+    if not isinstance(parsed, list):
+        return [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+    models = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("is_enabled", True):
+            continue
+        merged = {**DEFAULT_SENSOR_CONSISTENCY_MODELS[0], **entry}
+        models.append(merged)
+    return models if models else [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+
 
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "lambda_decay": 0.97,
@@ -739,17 +771,18 @@ def _data_status_from_gaps_and_staleness(
 
 async def _sensor_consistency_diagnosis(
     db: AsyncSession,
-    reference_sensor_id: str,
-    target_sensor_id: str,
+    model: dict[str, Any],
     *,
     now: datetime,
 ) -> dict[str, Any] | None:
-    """Compute 002->003 affine mapping residual for Shadow Mode diagnosis only.
+    """Compute affine mapping residual for a configured sensor pair.
 
     This result is purely diagnostic and must not be used to suppress hazard alerts.
     Readings are linearly interpolated to a common time so that asynchronous sampling
     does not produce false residuals during rapid water level changes.
     """
+    reference_sensor_id = model["reference_sensor_id"]
+    target_sensor_id = model["target_sensor_id"]
     reference = await _latest_sensor_reading(db, reference_sensor_id, now=now)
     target = await _latest_sensor_reading(db, target_sensor_id, now=now)
     if reference is None or target is None:
@@ -775,7 +808,6 @@ async def _sensor_consistency_diagnosis(
         abs((reference_recorded_at - target_recorded_at).total_seconds())
     )
 
-    model = SENSOR_CONSISTENCY_MODEL
     expected_target = model["slope"] * reference_level + model["intercept_cm"]
     residual = target_level - expected_target
     abs_residual = abs(residual)
@@ -792,16 +824,23 @@ async def _sensor_consistency_diagnosis(
     else:
         alignment_status = "aligned"
 
-    effective_p95 = model["p95_abs_residual_cm"]
+    normal_threshold = _to_float(model.get("normal_abs_residual_cm"), 0.5)
+    warning_threshold = _to_float(model.get("warning_abs_residual_cm"), 1.0)
+    conflict_threshold = _to_float(model.get("conflict_abs_residual_cm"), 1.5)
     if alignment_status == "degraded":
-        effective_p95 = effective_p95 * 2.5
+        relax_factor = 2.5
+        normal_threshold = normal_threshold * relax_factor
+        warning_threshold = warning_threshold * relax_factor
+        conflict_threshold = conflict_threshold * relax_factor
 
     if abs_residual is None:
         instantaneous_consistency = "unknown"
-    elif abs_residual <= model["median_abs_residual_cm"]:
+    elif abs_residual <= normal_threshold:
         instantaneous_consistency = "normal"
-    elif abs_residual <= effective_p95:
+    elif abs_residual <= warning_threshold:
         instantaneous_consistency = "warning"
+    elif abs_residual <= conflict_threshold:
+        instantaneous_consistency = "conflict"
     else:
         instantaneous_consistency = "conflict"
 
@@ -816,9 +855,13 @@ async def _sensor_consistency_diagnosis(
         "target_level_cm": round(target_level, 2),
         "expected_target_cm": round(expected_target, 2),
         "residual_cm": round(residual, 2) if residual is not None else None,
-        "median_abs_residual_cm": model["median_abs_residual_cm"],
-        "p95_abs_residual_cm": model["p95_abs_residual_cm"],
-        "calibration_sample_size": model["calibration_sample_size"],
+        "normal_abs_residual_cm": round(normal_threshold, 2),
+        "warning_abs_residual_cm": round(warning_threshold, 2),
+        "conflict_abs_residual_cm": round(conflict_threshold, 2),
+        "median_abs_residual_cm": model.get("median_abs_residual_cm"),
+        "p95_abs_residual_cm": model.get("p95_abs_residual_cm"),
+        "calibration_sample_size": model.get("calibration_sample_size"),
+        "calibration_version": model.get("calibration_version"),
         "reference_stale": reference_stale,
         "target_stale": target_stale,
         "sensor_health": "unknown",
@@ -847,6 +890,19 @@ def _threshold_provenance(sensor: Sensor) -> dict[str, Any]:
     }
 
 
+def _select_consistency_diagnosis_for_sensor(
+    sensor_id: str,
+    diagnoses: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first diagnosis that involves the given sensor."""
+    for diagnosis in diagnoses:
+        if diagnosis is None:
+            continue
+        if diagnosis.get("reference_sensor_id") == sensor_id or diagnosis.get("target_sensor_id") == sensor_id:
+            return diagnosis
+    return None
+
+
 async def _compute_prediction(
     db: AsyncSession,
     *,
@@ -855,6 +911,7 @@ async def _compute_prediction(
     global_params: dict[str, Any],
     horizon_hours: int,
     now: datetime,
+    consistency_diagnoses: list[dict[str, Any]],
 ) -> dict[str, Any]:
     now_hour = floor_to_hour(now)
     model_params = _merge_params(
@@ -910,11 +967,8 @@ async def _compute_prediction(
     advisory_only = data_status != "available"
 
     # Shadow Mode sensor-consistency diagnosis; never used to suppress hazard alerts.
-    consistency_diagnosis = await _sensor_consistency_diagnosis(
-        db,
-        SENSOR_CONSISTENCY_MODEL["reference_sensor_id"],
-        SENSOR_CONSISTENCY_MODEL["target_sensor_id"],
-        now=now,
+    consistency_diagnosis = _select_consistency_diagnosis_for_sensor(
+        sensor.sensor_id, consistency_diagnoses
     )
     threshold_provenance = _threshold_provenance(sensor)
 
@@ -952,6 +1006,7 @@ async def _compute_prediction(
                 "can_auto_resolve": False,
                 "advisory_only": True,
                 "sensor_consistency_diagnosis": consistency_diagnosis,
+                "sensor_consistency_diagnoses": consistency_diagnoses,
                 "threshold_provenance": threshold_provenance,
             },
             "series": [],
@@ -987,6 +1042,7 @@ async def _compute_prediction(
                 "forecast_station_id": forecast_station_id,
                 "rain_source_degraded": rain_source_degraded,
                 "sensor_consistency_diagnosis": consistency_diagnosis,
+                "sensor_consistency_diagnoses": consistency_diagnoses,
                 "threshold_provenance": threshold_provenance,
             },
             "series": [],
@@ -1146,6 +1202,7 @@ async def _compute_prediction(
         "policy_reason": policy_reason,
         "reading_stale": reading_stale,
         "sensor_consistency_diagnosis": consistency_diagnosis,
+        "sensor_consistency_diagnoses": consistency_diagnoses,
         "threshold_provenance": threshold_provenance,
         "validated_params": {
             "lambda_decay": model_params.get("lambda_decay"),
@@ -1368,6 +1425,18 @@ async def evaluate_forecast_alerts(
     if sensor_ids:
         query = query.where(Sensor.sensor_id.in_(sensor_ids))
     sensors = (await db.execute(query)).scalars().unique().all()
+
+    # Load consistency models and compute run-level diagnoses once.
+    consistency_models = await _get_sensor_consistency_models(control_db)
+    consistency_diagnoses: list[dict[str, Any]] = []
+    for model in consistency_models:
+        try:
+            diagnosis = await _sensor_consistency_diagnosis(db, model, now=now)
+            consistency_diagnoses.append(diagnosis)
+        except Exception:
+            # A model-level failure must not block the rest of the prediction run.
+            consistency_diagnoses.append(None)
+
     results: list[ForecastPredictionResult] = []
     latest_forecast_issued_at: datetime | None = None
     global_params = global_config.get("model_params") or {}
@@ -1391,6 +1460,7 @@ async def evaluate_forecast_alerts(
                 global_params=global_params,
                 horizon_hours=effective_horizon,
                 now=now,
+                consistency_diagnoses=consistency_diagnoses,
             )
             latest_forecast_issued_at = max(
                 [value for value in (latest_forecast_issued_at, prediction.get("forecast_issued_at")) if value],

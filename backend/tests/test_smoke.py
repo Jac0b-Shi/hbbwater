@@ -104,6 +104,7 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(infer_ultrasonic_status(sensor, 25.0), "danger")
         self.assertTrue(is_threshold_configuration_valid(50, 30, "less_or_equal"))
         self.assertFalse(is_threshold_configuration_valid(30, 50, "less_or_equal"))
+        self.assertFalse(is_threshold_configuration_valid(50, 50, "less_or_equal"))
 
     def test_ultrasonic_status_supports_greater_or_equal_thresholds(self):
         sensor = SimpleNamespace(
@@ -115,6 +116,7 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(infer_ultrasonic_status(sensor, 55.0), "danger")
         self.assertTrue(is_threshold_configuration_valid(30, 50, "greater_or_equal"))
         self.assertFalse(is_threshold_configuration_valid(50, 30, "greater_or_equal"))
+        self.assertFalse(is_threshold_configuration_valid(30, 30, "greater_or_equal"))
 
     def test_get_internal_api_token_reads_environment(self):
         with patch.dict(os.environ, {"INTERNAL_API_TOKEN": "shared-token"}):

@@ -404,11 +404,11 @@ const measurementUnitOptions = [
   { value: 'cm', label: '厘米 (cm)' },
   { value: 'mm', label: '毫米 (mm)' },
 ]
-const thresholdConditionHint = computed(() => (
-  sensorForm.value.threshold_condition === 'less_or_equal'
-    ? '适合“传感器到水面的测距值”，值越小越危险；此时危险阈值应小于等于预警阈值'
-    : '适合常规水位值，值越大越危险；此时危险阈值应大于等于预警阈值'
-))
+  const thresholdConditionHint = computed(() => (
+    sensorForm.value.threshold_condition === 'less_or_equal'
+      ? '适合“传感器到水面的测距值”，值越小越危险；此时危险阈值必须严格小于预警阈值'
+      : '适合常规水位值，值越大越危险；此时危险阈值必须严格大于预警阈值'
+  ))
 
 const filteredGroups = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -634,13 +634,13 @@ const saveSensor = async () => {
   ) {
     const invalid =
       payload.threshold_condition === 'less_or_equal'
-        ? Number(payload.danger_level) > Number(payload.warning_level)
-        : Number(payload.danger_level) < Number(payload.warning_level)
+        ? Number(payload.danger_level) >= Number(payload.warning_level)
+        : Number(payload.danger_level) <= Number(payload.warning_level)
     if (invalid) {
       ElMessage.error(
         payload.threshold_condition === 'less_or_equal'
-          ? '当前为“小于等于阈值触发”，危险阈值必须小于或等于预警阈值'
-          : '当前为“大于等于阈值触发”，危险阈值必须大于或等于预警阈值'
+          ? '当前为“小于等于阈值触发”，危险阈值必须严格小于预警阈值'
+          : '当前为“大于等于阈值触发”，危险阈值必须严格大于预警阈值'
       )
       return
     }

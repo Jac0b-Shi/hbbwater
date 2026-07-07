@@ -56,14 +56,14 @@ def is_threshold_configuration_valid(
     warning = float(warning_level)
     danger = float(danger_level)
     if normalize_threshold_condition(condition) == THRESHOLD_CONDITION_LESS_OR_EQUAL:
-        return danger <= warning
-    return danger >= warning
+        return danger < warning
+    return danger > warning
 
 
 def get_threshold_configuration_error(condition: Optional[str]) -> str:
     if normalize_threshold_condition(condition) == THRESHOLD_CONDITION_LESS_OR_EQUAL:
-        return "当前比较方式为“小于等于阈值触发”，危险阈值必须小于或等于预警阈值"
-    return "当前比较方式为“大于等于阈值触发”，危险阈值必须大于或等于预警阈值"
+        return "当前比较方式为“小于等于阈值触发”，危险阈值必须严格小于预警阈值"
+    return "当前比较方式为“大于等于阈值触发”，危险阈值必须严格大于预警阈值"
 
 
 def compare_threshold(value: float, threshold: Optional[Decimal | float], condition: Optional[str]) -> bool:

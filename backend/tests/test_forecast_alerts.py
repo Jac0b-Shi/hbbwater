@@ -402,6 +402,62 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(provenance.get("threshold_version"), "2026-07-v1")
             self.assertIn("首次越堤线", provenance.get("threshold_note", ""))
 
+    async def test_sensor_consistency_models_load_from_system_config(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, reading, _profile = await self._seed_sensor(session)
+            sensor_003 = Sensor(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                location="D楼3号",
+                warning_level=Decimal("70.6"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                water_level_baseline=Decimal("80"),
+                normal_interval=300,
+                is_active=True,
+            )
+            reading_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal("89.00"),
+                status="normal",
+                recorded_at=reading.recorded_at,
+            )
+            session.add_all([sensor_003, reading_003])
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            custom_config = [
+                {
+                    "reference_sensor_id": "ultrasonic_002",
+                    "target_sensor_id": "ultrasonic_003",
+                    "slope": 0.9840,
+                    "intercept_cm": -9.26,
+                    "normal_abs_residual_cm": 0.1,
+                    "warning_abs_residual_cm": 0.2,
+                    "conflict_abs_residual_cm": 0.3,
+                    "calibration_version": "config-test-v1",
+                    "is_enabled": True,
+                }
+            ]
+            import json
+            await set_config_value(control, "sensor_consistency_models", json.dumps(custom_config))
+            await control.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            self.assertIsNotNone(diagnosis)
+            self.assertEqual(diagnosis.get("normal_abs_residual_cm"), 0.1)
+            self.assertEqual(diagnosis.get("warning_abs_residual_cm"), 0.2)
+            self.assertEqual(diagnosis.get("conflict_abs_residual_cm"), 0.3)
+            self.assertEqual(diagnosis.get("calibration_version"), "config-test-v1")
+            # Residual is ~0.14 cm, so it should fall into warning with the custom thresholds.
+            self.assertEqual(diagnosis.get("instantaneous_consistency"), "warning")
+
     async def test_sensor_consistency_async_sampling(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
             await self._seed_station(session, "A5151")
