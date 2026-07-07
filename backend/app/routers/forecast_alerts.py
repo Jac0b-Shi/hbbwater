@@ -49,7 +49,7 @@ async def update_forecast_alert_config(
         if payload.global_config is not None:
             await save_forecast_alert_global_config(
                 control_db,
-                payload.global_config.model_dump(),
+                payload.global_config.model_dump(exclude_unset=True),
             )
         await upsert_forecast_alert_profiles(
             db,

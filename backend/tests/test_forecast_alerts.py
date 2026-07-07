@@ -367,7 +367,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
 
             result = run.results[0]
             features = result.features or {}
-            diagnosis = features.get("sensor_consistency_diagnosis")
+            diagnoses = features.get("sensor_consistency_diagnoses") or []
+            self.assertEqual(len(diagnoses), 1)
+            diagnosis = diagnoses[0]
             self.assertIsNotNone(diagnosis)
             self.assertTrue(diagnosis.get("diagnostic_only"))
             self.assertEqual(diagnosis.get("alignment_status"), "aligned")
@@ -436,7 +438,6 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
                     "intercept_cm": -9.26,
                     "normal_abs_residual_cm": 0.1,
                     "warning_abs_residual_cm": 0.2,
-                    "conflict_abs_residual_cm": 0.3,
                     "calibration_version": "config-test-v1",
                     "is_enabled": True,
                 }
@@ -449,14 +450,145 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
 
             result = run.results[0]
-            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+            self.assertEqual(len(diagnoses), 1)
+            diagnosis = diagnoses[0]
             self.assertIsNotNone(diagnosis)
             self.assertEqual(diagnosis.get("normal_abs_residual_cm"), 0.1)
             self.assertEqual(diagnosis.get("warning_abs_residual_cm"), 0.2)
-            self.assertEqual(diagnosis.get("conflict_abs_residual_cm"), 0.3)
             self.assertEqual(diagnosis.get("calibration_version"), "config-test-v1")
             # Residual is ~0.14 cm, so it should fall into warning with the custom thresholds.
             self.assertEqual(diagnosis.get("instantaneous_consistency"), "warning")
+
+    async def test_sensor_consistency_models_explicit_empty_list_disables_diagnosis(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session)
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await set_config_value(control, "sensor_consistency_models", "[]")
+            await control.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertEqual(result.features.get("sensor_consistency_diagnoses"), [])
+            self.assertEqual(run.diagnostics, [])
+
+    async def test_sensor_consistency_models_all_disabled_disables_diagnosis(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session)
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            disabled_config = [
+                {
+                    "reference_sensor_id": "ultrasonic_002",
+                    "target_sensor_id": "ultrasonic_003",
+                    "slope": 0.9840,
+                    "intercept_cm": -9.26,
+                    "is_enabled": False,
+                }
+            ]
+            import json
+            await set_config_value(control, "sensor_consistency_models", json.dumps(disabled_config))
+            await control.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertEqual(result.features.get("sensor_consistency_diagnoses"), [])
+            self.assertEqual(run.diagnostics, [])
+
+    async def test_sensor_consistency_models_invalid_config_raises(self):
+        async with self.control_session_factory() as control:
+            invalid_config = [
+                {
+                    "reference_sensor_id": "ultrasonic_002",
+                    "target_sensor_id": "ultrasonic_002",
+                    "slope": 0.9840,
+                    "intercept_cm": -9.26,
+                }
+            ]
+            import json
+            await set_config_value(control, "sensor_consistency_models", json.dumps(invalid_config))
+            await control.commit()
+
+            from app.services.forecast_alerts import _get_sensor_consistency_models
+            with self.assertRaises(ValueError) as ctx:
+                await _get_sensor_consistency_models(control)
+            self.assertIn("reference_sensor_id", str(ctx.exception).lower())
+
+    async def test_sensor_consistency_run_diagnostics_store_all_models(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, reading, _profile = await self._seed_sensor(session)
+            sensor_003 = Sensor(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                location="D楼3号",
+                warning_level=Decimal("70.6"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                water_level_baseline=Decimal("80"),
+                normal_interval=300,
+                is_active=True,
+            )
+            reading_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal("89.14"),
+                status="normal",
+                recorded_at=reading.recorded_at,
+            )
+            session.add_all([sensor_003, reading_003])
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            self.assertIsNotNone(run.diagnostics)
+            self.assertEqual(len(run.diagnostics), 1)
+            self.assertEqual(run.diagnostics[0].get("reference_sensor_id"), "ultrasonic_002")
+            self.assertEqual(run.diagnostics[0].get("target_sensor_id"), "ultrasonic_003")
+
+    async def test_sensor_consistency_result_only_contains_related_diagnoses(self):
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            await self._seed_sensor(session)
+            sensor_003 = Sensor(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                location="D楼3号",
+                warning_level=Decimal("70.6"),
+                danger_level=Decimal("60.0"),
+                threshold_condition="less_or_equal",
+                water_level_baseline=Decimal("80"),
+                normal_interval=300,
+                is_active=True,
+            )
+            reading_003 = SensorReading(
+                sensor_id="ultrasonic_003",
+                sensor_type="ultrasonic",
+                water_level=Decimal("89.14"),
+                status="normal",
+                recorded_at=datetime.utcnow(),
+            )
+            session.add_all([sensor_003, reading_003])
+            await self._seed_forecast(session, "A5151", [0, 0, 0, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            for result in run.results:
+                diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+                for diagnosis in diagnoses:
+                    self.assertIn(
+                        result.sensor_id,
+                        [diagnosis.get("reference_sensor_id"), diagnosis.get("target_sensor_id")],
+                    )
 
     async def test_sensor_consistency_async_sampling(self):
         async with self.business_session_factory() as session, self.control_session_factory() as control:
@@ -492,7 +624,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             # Same time: aligned.
             run = await evaluate_forecast_alerts(session, control, dry_run=True)
             result = run.results[0]
-            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+            self.assertTrue(diagnoses)
+            diagnosis = diagnoses[0]
             self.assertEqual(diagnosis.get("alignment_status"), "aligned")
             self.assertEqual(diagnosis.get("alignment_delta_seconds"), 0)
             self.assertIsNotNone(diagnosis.get("residual_cm"))
@@ -503,7 +637,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
             run = await evaluate_forecast_alerts(session, control, dry_run=True)
             result = run.results[0]
-            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+            self.assertTrue(diagnoses)
+            diagnosis = diagnoses[0]
             self.assertEqual(diagnosis.get("alignment_status"), "aligned")
             self.assertEqual(diagnosis.get("alignment_delta_seconds"), 120)
             self.assertIsNotNone(diagnosis.get("residual_cm"))
@@ -513,7 +649,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
             run = await evaluate_forecast_alerts(session, control, dry_run=True)
             result = run.results[0]
-            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+            self.assertTrue(diagnoses)
+            diagnosis = diagnoses[0]
             self.assertEqual(diagnosis.get("alignment_status"), "degraded")
             self.assertEqual(diagnosis.get("alignment_delta_seconds"), 300)
             self.assertIsNotNone(diagnosis.get("residual_cm"))
@@ -523,7 +661,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
             run = await evaluate_forecast_alerts(session, control, dry_run=True)
             result = run.results[0]
-            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+            self.assertTrue(diagnoses)
+            diagnosis = diagnoses[0]
             self.assertEqual(diagnosis.get("alignment_status"), "unavailable")
             self.assertIsNone(diagnosis.get("residual_cm"))
 
@@ -551,7 +691,9 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
             await session.commit()
             run = await evaluate_forecast_alerts(session, control, dry_run=True)
             result = run.results[0]
-            diagnosis = result.features.get("sensor_consistency_diagnosis")
+            diagnoses = result.features.get("sensor_consistency_diagnoses") or []
+            self.assertTrue(diagnoses)
+            diagnosis = diagnoses[0]
             self.assertEqual(diagnosis.get("alignment_status"), "aligned")
             # Interpolation to the common time (base_time + 180s) should cancel the drift.
             self.assertLess(abs(diagnosis.get("residual_cm")), 0.1)

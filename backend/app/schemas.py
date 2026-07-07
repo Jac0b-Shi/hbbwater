@@ -464,11 +464,34 @@ class ForecastModelParams(BaseModel):
         return self
 
 
+class SensorConsistencyModelConfig(BaseModel):
+    reference_sensor_id: str = Field(..., max_length=50)
+    target_sensor_id: str = Field(..., max_length=50)
+    slope: float = Field(...)
+    intercept_cm: float = Field(...)
+    normal_abs_residual_cm: float = Field(default=0.5, gt=0)
+    warning_abs_residual_cm: float = Field(default=1.0, gt=0)
+    median_abs_residual_cm: Optional[float] = None
+    p95_abs_residual_cm: Optional[float] = None
+    calibration_sample_size: Optional[int] = None
+    calibration_version: Optional[str] = Field(None, max_length=50)
+    is_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_model(self):
+        if self.reference_sensor_id == self.target_sensor_id:
+            raise ValueError("reference_sensor_id and target_sensor_id must be different")
+        if self.normal_abs_residual_cm >= self.warning_abs_residual_cm:
+            raise ValueError("normal_abs_residual_cm must be strictly less than warning_abs_residual_cm")
+        return self
+
+
 class ForecastAlertGlobalConfig(BaseModel):
     enabled: bool = False
     cooldown_minutes: int = Field(default=120, ge=5, le=1440)
     default_horizon_hours: int = Field(default=6, ge=1, le=24)
     model_params: Dict[str, Any] = Field(default_factory=dict)
+    sensor_consistency_models: List[SensorConsistencyModelConfig] = Field(default_factory=list)
 
     @field_validator("model_params")
     @classmethod
@@ -622,6 +645,7 @@ class ForecastPredictionRunResponse(BaseModel):
     completed_at: Optional[datetime]
     created_by: Optional[str]
     source: Optional[Dict[str, Any]]
+    diagnostics: Optional[List[Dict[str, Any]]] = None
     created_at: datetime
     results: List[ForecastPredictionResultResponse] = Field(default_factory=list)
 

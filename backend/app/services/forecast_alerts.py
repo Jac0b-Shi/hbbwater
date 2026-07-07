@@ -56,7 +56,6 @@ DEFAULT_SENSOR_CONSISTENCY_MODELS: list[dict[str, Any]] = [
         "intercept_cm": -9.26,
         "normal_abs_residual_cm": 0.5,
         "warning_abs_residual_cm": 1.0,
-        "conflict_abs_residual_cm": 1.5,
         "median_abs_residual_cm": 0.11,
         "p95_abs_residual_cm": 0.42,
         "calibration_sample_size": 3145,
@@ -69,25 +68,40 @@ SENSOR_CONSISTENCY_MODELS_KEY = "sensor_consistency_models"
 
 
 async def _get_sensor_consistency_models(control_db: AsyncSession) -> list[dict[str, Any]]:
-    """Load configured sensor consistency models, falling back to defaults."""
+    """Load configured sensor consistency models.
+
+    Missing or null config falls back to the default seed list. An explicit empty
+    list or a list where every model is disabled returns [], disabling the
+    diagnostic entirely. Any invalid model raises ValueError instead of silently
+    falling back to the default seed pair.
+    """
     raw = await get_config_value(control_db, SENSOR_CONSISTENCY_MODELS_KEY, default="")
-    if not raw:
+    if raw is None or raw == "":
         return [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"sensor_consistency_models is not valid JSON: {exc}") from exc
+
     if not isinstance(parsed, list):
-        return [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
-    models = []
-    for entry in parsed:
-        if not isinstance(entry, dict):
-            continue
-        if not entry.get("is_enabled", True):
-            continue
-        merged = {**DEFAULT_SENSOR_CONSISTENCY_MODELS[0], **entry}
-        models.append(merged)
-    return models if models else [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+        raise ValueError("sensor_consistency_models must be a list")
+
+    if not parsed:
+        return []
+
+    from app.schemas import SensorConsistencyModelConfig
+
+    validated = []
+    for index, entry in enumerate(parsed):
+        try:
+            model = SensorConsistencyModelConfig.model_validate(entry)
+        except Exception as exc:
+            raise ValueError(f"sensor_consistency_models[{index}] is invalid: {exc}") from exc
+        if model.is_enabled:
+            validated.append(model.model_dump())
+
+    return validated
 
 
 DEFAULT_MODEL_PARAMS: dict[str, Any] = {
@@ -263,7 +277,7 @@ def _rainfall_pressure_mm(rainfall_mm: float, params: dict[str, Any]) -> float:
 
 
 async def get_forecast_alert_global_config(control_db: AsyncSession) -> dict[str, Any]:
-    return {
+    config = {
         "enabled": await get_bool_config(control_db, FORECAST_ALERT_ENABLED_KEY, False),
         "cooldown_minutes": await get_int_config(control_db, FORECAST_ALERT_COOLDOWN_KEY, 120),
         "default_horizon_hours": await get_int_config(control_db, FORECAST_ALERT_HORIZON_KEY, 6),
@@ -271,9 +285,21 @@ async def get_forecast_alert_global_config(control_db: AsyncSession) -> dict[str
             await get_config_value(control_db, FORECAST_ALERT_MODEL_PARAMS_KEY, "{}")
         ),
     }
+    raw_models = await get_config_value(control_db, SENSOR_CONSISTENCY_MODELS_KEY, default=None)
+    if raw_models is None:
+        config["sensor_consistency_models"] = [dict(model) for model in DEFAULT_SENSOR_CONSISTENCY_MODELS]
+    else:
+        try:
+            parsed = json.loads(raw_models)
+        except (TypeError, ValueError):
+            parsed = []
+        config["sensor_consistency_models"] = parsed if isinstance(parsed, list) else []
+    return config
 
 
 async def save_forecast_alert_global_config(control_db: AsyncSession, config: dict[str, Any]) -> None:
+    from app.schemas import SensorConsistencyModelConfig
+
     if "enabled" in config:
         await set_config_value(
             control_db,
@@ -302,6 +328,22 @@ async def save_forecast_alert_global_config(control_db: AsyncSession, config: di
             json.dumps(config["model_params"] or {}, ensure_ascii=False),
             "预报型告警模型参数",
         )
+    if "sensor_consistency_models" in config:
+        raw_models = config["sensor_consistency_models"] or []
+        validated = []
+        for index, entry in enumerate(raw_models):
+            try:
+                model = SensorConsistencyModelConfig.model_validate(entry)
+            except Exception as exc:
+                raise ValueError(f"sensor_consistency_models[{index}] is invalid: {exc}") from exc
+            validated.append(model.model_dump())
+        await set_config_value(
+            control_db,
+            SENSOR_CONSISTENCY_MODELS_KEY,
+            json.dumps(validated, ensure_ascii=False),
+            "传感器一致性诊断模型配置",
+        )
+
 
 
 async def list_forecast_alert_config(
@@ -826,12 +868,10 @@ async def _sensor_consistency_diagnosis(
 
     normal_threshold = _to_float(model.get("normal_abs_residual_cm"), 0.5)
     warning_threshold = _to_float(model.get("warning_abs_residual_cm"), 1.0)
-    conflict_threshold = _to_float(model.get("conflict_abs_residual_cm"), 1.5)
     if alignment_status == "degraded":
         relax_factor = 2.5
         normal_threshold = normal_threshold * relax_factor
         warning_threshold = warning_threshold * relax_factor
-        conflict_threshold = conflict_threshold * relax_factor
 
     if abs_residual is None:
         instantaneous_consistency = "unknown"
@@ -839,8 +879,6 @@ async def _sensor_consistency_diagnosis(
         instantaneous_consistency = "normal"
     elif abs_residual <= warning_threshold:
         instantaneous_consistency = "warning"
-    elif abs_residual <= conflict_threshold:
-        instantaneous_consistency = "conflict"
     else:
         instantaneous_consistency = "conflict"
 
@@ -857,7 +895,6 @@ async def _sensor_consistency_diagnosis(
         "residual_cm": round(residual, 2) if residual is not None else None,
         "normal_abs_residual_cm": round(normal_threshold, 2),
         "warning_abs_residual_cm": round(warning_threshold, 2),
-        "conflict_abs_residual_cm": round(conflict_threshold, 2),
         "median_abs_residual_cm": model.get("median_abs_residual_cm"),
         "p95_abs_residual_cm": model.get("p95_abs_residual_cm"),
         "calibration_sample_size": model.get("calibration_sample_size"),
@@ -890,17 +927,20 @@ def _threshold_provenance(sensor: Sensor) -> dict[str, Any]:
     }
 
 
-def _select_consistency_diagnosis_for_sensor(
+def _select_consistency_diagnoses_for_sensor(
     sensor_id: str,
     diagnoses: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Return the first diagnosis that involves the given sensor."""
-    for diagnosis in diagnoses:
-        if diagnosis is None:
-            continue
-        if diagnosis.get("reference_sensor_id") == sensor_id or diagnosis.get("target_sensor_id") == sensor_id:
-            return diagnosis
-    return None
+) -> list[dict[str, Any]]:
+    """Return all diagnoses that involve the given sensor."""
+    return [
+        diagnosis
+        for diagnosis in diagnoses
+        if diagnosis is not None
+        and (
+            diagnosis.get("reference_sensor_id") == sensor_id
+            or diagnosis.get("target_sensor_id") == sensor_id
+        )
+    ]
 
 
 async def _compute_prediction(
@@ -967,7 +1007,7 @@ async def _compute_prediction(
     advisory_only = data_status != "available"
 
     # Shadow Mode sensor-consistency diagnosis; never used to suppress hazard alerts.
-    consistency_diagnosis = _select_consistency_diagnosis_for_sensor(
+    sensor_consistency_diagnoses = _select_consistency_diagnoses_for_sensor(
         sensor.sensor_id, consistency_diagnoses
     )
     threshold_provenance = _threshold_provenance(sensor)
@@ -1005,7 +1045,7 @@ async def _compute_prediction(
                 "reading_stale": reading_stale,
                 "can_auto_resolve": False,
                 "advisory_only": True,
-                "sensor_consistency_diagnosis": consistency_diagnosis,
+                "sensor_consistency_diagnoses": sensor_consistency_diagnoses,
                 "sensor_consistency_diagnoses": consistency_diagnoses,
                 "threshold_provenance": threshold_provenance,
             },
@@ -1041,8 +1081,7 @@ async def _compute_prediction(
                 "actual_station_id": actual_station_id,
                 "forecast_station_id": forecast_station_id,
                 "rain_source_degraded": rain_source_degraded,
-                "sensor_consistency_diagnosis": consistency_diagnosis,
-                "sensor_consistency_diagnoses": consistency_diagnoses,
+                "sensor_consistency_diagnoses": sensor_consistency_diagnoses,
                 "threshold_provenance": threshold_provenance,
             },
             "series": [],
@@ -1201,8 +1240,7 @@ async def _compute_prediction(
         "effective_risk": effective_risk,
         "policy_reason": policy_reason,
         "reading_stale": reading_stale,
-        "sensor_consistency_diagnosis": consistency_diagnosis,
-        "sensor_consistency_diagnoses": consistency_diagnoses,
+        "sensor_consistency_diagnoses": sensor_consistency_diagnoses,
         "threshold_provenance": threshold_provenance,
         "validated_params": {
             "lambda_decay": model_params.get("lambda_decay"),
@@ -1539,6 +1577,7 @@ async def evaluate_forecast_alerts(
     run.message = f"已评估 {len(results)} 个传感器"
     run.forecast_issued_at = latest_forecast_issued_at
     run.completed_at = utcnow_naive()
+    run.diagnostics = [d for d in consistency_diagnoses if d is not None]
     await db.flush()
     # Eagerly load results to avoid lazy-loading issues for callers.
     run_with_results = (

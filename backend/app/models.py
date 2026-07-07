@@ -362,6 +362,7 @@ class ForecastPredictionRun(BusinessBase):
     completed_at = Column(DateTime, nullable=True)
     created_by = Column(String(50), nullable=True)
     source = Column(JSONText)
+    diagnostics = Column(JSONText)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     results = relationship("ForecastPredictionResult", back_populates="run", cascade="all, delete-orphan")
