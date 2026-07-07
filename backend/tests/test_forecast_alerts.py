@@ -1106,18 +1106,86 @@ class ForecastAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(migrated.pump_trigger_offset_mm, 0)
         self.assertEqual(migrated.scenario_pump_count, 2)
 
-    async def test_scenario_pump_count_must_be_zero_or_two(self):
-        """Until q1/q3 are calibrated, only 0 or 2 pumps are valid."""
+    async def test_scenario_pump_count_is_normalized_to_zero_or_two(self):
+        """Until q1/q3 are calibrated, 1 or 3 are normalized to 2."""
         from app.schemas import ForecastPumpParams
 
         for invalid in (1, 3):
-            with self.assertRaises(ValueError):
-                ForecastPumpParams(scenario_pump_count=invalid)
+            normalized = ForecastPumpParams(scenario_pump_count=invalid)
+            self.assertEqual(normalized.scenario_pump_count, 2)
 
         zero = ForecastPumpParams(scenario_pump_count=0)
         self.assertEqual(zero.scenario_pump_count, 0)
         two = ForecastPumpParams(scenario_pump_count=2)
         self.assertEqual(two.scenario_pump_count, 2)
+
+    async def test_legacy_scenario_pump_count_one_or_three_is_migrated(self):
+        """Old configs with 1 or 3 pumps must be normalized to 2 for GET responses."""
+        from app.schemas import ForecastAlertProfileResponse
+
+        for invalid_count in (1, 3):
+            response = ForecastAlertProfileResponse(
+                sensor_id="ultrasonic_002",
+                is_enabled=True,
+                pump_params={
+                    "pump_trigger_anchor": "warning",
+                    "pump_trigger_offset_mm": 0,
+                    "scenario_pump_count": invalid_count,
+                    "net_drawdown_by_pump_count_cm_per_h": {"0": 0, "1": None, "2": 6.23, "3": None},
+                    "drawdown_parameter_status": {"0": "defined", "1": "unknown", "2": "inferred", "3": "unknown"},
+                },
+            )
+            self.assertEqual(response.pump_params.scenario_pump_count, 2)
+
+    async def test_greater_or_equal_pump_threshold_direction(self):
+        """For greater_or_equal, the derived threshold is below the anchor level."""
+        from app.services.forecast_alerts import _derived_pump_threshold_cm
+        from app.models import Sensor
+        from decimal import Decimal
+
+        sensor = Sensor(
+            sensor_id="ultrasonic_002",
+            sensor_type="ultrasonic",
+            location="D楼",
+            warning_level=Decimal("20.0"),
+            danger_level=Decimal("30.0"),
+            threshold_condition="greater_or_equal",
+        )
+        params = {"pump_trigger_anchor": "warning", "pump_trigger_offset_mm": 50}
+        # warning=20cm, offset=50mm=5cm, greater_or_equal -> trigger = 20 - 5 = 15cm
+        self.assertEqual(_derived_pump_threshold_cm(sensor, params), 15.0)
+
+        params_danger = {"pump_trigger_anchor": "danger", "pump_trigger_offset_mm": 50}
+        # danger=30cm, offset=50mm=5cm, greater_or_equal -> trigger = 30 - 5 = 25cm
+        self.assertEqual(_derived_pump_threshold_cm(sensor, params_danger), 25.0)
+
+    async def test_pump_assumption_derived_from_drawdown_status(self):
+        """pump_assumption should follow drawdown_parameter_status, not a separate field."""
+        async with self.business_session_factory() as session, self.control_session_factory() as control:
+            await self._seed_station(session, "A5151")
+            sensor, _reading, profile = await self._seed_sensor(
+                session, baseline=Decimal("100"), latest=Decimal("100"),
+                warning=Decimal("95"), danger=Decimal("90")
+            )
+            profile.pump_params = {
+                "pump_trigger_anchor": "warning",
+                "pump_trigger_offset_mm": 0,
+                "scenario_pump_count": 2,
+                "net_drawdown_by_pump_count_cm_per_h": {"0": 0, "1": None, "2": 6.23, "3": None},
+                "drawdown_parameter_status": {"0": "defined", "1": "unknown", "2": "measured", "3": "unknown"},
+            }
+            await self._seed_forecast(session, "A5151", [20, 20, 20, 0, 0, 0])
+            await session.commit()
+
+            run = await evaluate_forecast_alerts(session, control, dry_run=True)
+            await session.commit()
+
+            result = run.results[0]
+            self.assertEqual(result.pump_assumption, "measured_q2")
+            series = result.series or []
+            active = [s for s in series if s.get("scenario_pump_count")]
+            for step in active:
+                self.assertEqual(step.get("pump_assumption"), "measured_q2")
 
     async def test_pump_scenario_triggered_by_sensor_warning_level(self):
         """Pump scenario should activate when projected distance reaches warning level."""

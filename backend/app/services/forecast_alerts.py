@@ -166,6 +166,20 @@ def _to_decimal(value: float | None) -> Decimal | None:
     return Decimal(str(round(value, 2)))
 
 
+def _pump_assumption_from_status(params: dict[str, Any], pump_count: int) -> str:
+    """Derive pump_assumption from the calibration status of the selected count.
+
+    This avoids contradiction between scenario_pump_count and pump_assumption.
+    """
+    status_table = _normalize_json_object(params.get("drawdown_parameter_status"))
+    status = status_table.get(str(pump_count), "unknown")
+    if status == "measured":
+        return f"measured_q{pump_count}"
+    if status == "inferred":
+        return f"inferred_q{pump_count}"
+    return f"unknown_q{pump_count}"
+
+
 def _derived_pump_threshold_cm(sensor: Sensor, params: dict[str, Any]) -> float | None:
     """Derive the absolute distance threshold that triggers the pump scenario.
 
@@ -237,7 +251,7 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
         scenario_pump_count = int(scenario_pump_count)
     except (TypeError, ValueError):
         scenario_pump_count = None
-    if scenario_pump_count is None or not (0 <= scenario_pump_count <= 3):
+    if scenario_pump_count is None or scenario_pump_count not in (0, 2):
         scenario_pump_count = DEFAULT_MODEL_PARAMS["scenario_pump_count"]
     validated["scenario_pump_count"] = scenario_pump_count
 
@@ -310,11 +324,14 @@ def _validate_model_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _migrate_legacy_pump_params(params: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert legacy pump_on_rise_mm into the anchor/offset/count model.
+    """Migrate legacy pump_params into the anchor/offset/count model.
 
     This is also done by the Pydantic schema, but the prediction path reads raw
     profile pump_params without re-validating, so the migration must be repeated
     here to keep existing deployments working.
+
+    pump_on_rise_mm is converted to the current safe default. Counts 1 or 3 are
+    normalized to 2 because q1/q3 are not yet calibrated.
     """
     if not params:
         return {}
@@ -324,6 +341,13 @@ def _migrate_legacy_pump_params(params: dict[str, Any] | None) -> dict[str, Any]
         migrated.setdefault("pump_trigger_anchor", "warning")
         migrated.setdefault("pump_trigger_offset_mm", 0.0)
         migrated.setdefault("scenario_pump_count", 2)
+    count = migrated.get("scenario_pump_count")
+    try:
+        count = int(count) if count is not None else 2
+    except (TypeError, ValueError):
+        count = 2
+    if count not in (0, 2):
+        migrated["scenario_pump_count"] = 2
     return migrated
 
 
@@ -1229,7 +1253,6 @@ async def _compute_prediction(
 
     derived_pump_threshold_cm = _derived_pump_threshold_cm(sensor, model_params)
     configured_pump_count = int(model_params.get("scenario_pump_count", DEFAULT_MODEL_PARAMS["scenario_pump_count"]))
-    configured_pump_assumption = model_params.get("pump_assumption") or DEFAULT_MODEL_PARAMS["pump_assumption"]
 
     drawdown_mm_per_h = 0.0
     pump_assumption_for_scenario: str | None = None
@@ -1240,10 +1263,9 @@ async def _compute_prediction(
             configured_pump_count = 0
         else:
             drawdown_mm_per_h = drawdown_cm_per_h * 10.0
-            if configured_pump_count == 2:
-                pump_assumption_for_scenario = configured_pump_assumption
-            else:
-                pump_assumption_for_scenario = f"inferred_q{configured_pump_count}"
+            pump_assumption_for_scenario = _pump_assumption_from_status(
+                model_params, configured_pump_count
+            )
 
     def _is_pump_triggered(observed_level_mm: float) -> bool:
         if derived_pump_threshold_cm is None or configured_pump_count == 0:
@@ -1256,7 +1278,7 @@ async def _compute_prediction(
             return "none"
         if pump_assumption_for_scenario is not None:
             return pump_assumption_for_scenario
-        return configured_pump_assumption
+        return _pump_assumption_from_status(model_params, count)
 
     free_level = 0.0
     observed_level = 0.0
@@ -1401,7 +1423,7 @@ async def _compute_prediction(
             "pump_trigger_anchor": model_params.get("pump_trigger_anchor"),
             "pump_trigger_offset_mm": model_params.get("pump_trigger_offset_mm"),
             "derived_pump_threshold_cm": derived_pump_threshold_cm,
-            "scenario_pump_count": model_params.get("scenario_pump_count"),
+            "effective_scenario_pump_count": configured_pump_count,
             "forecast_gap_ratio_threshold": gap_ratio_threshold,
             "net_drawdown_by_pump_count_cm_per_h": model_params.get("net_drawdown_by_pump_count_cm_per_h"),
             "drawdown_parameter_status": model_params.get("drawdown_parameter_status"),
