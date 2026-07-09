@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Alert, AlertType, Sensor, SensorReading, SensorType
@@ -105,16 +105,23 @@ async def _resolve_active_alerts(
 ) -> None:
     resolved_at = _normalize_datetime_to_utc_naive(resolved_at)
     result = await db.execute(
-        select(Alert).where(
+        select(Alert.id).where(
             Alert.sensor_id == sensor_id,
             Alert.alert_type == alert_type,
             Alert.is_resolved == False,
         )
     )
-    for alert in result.scalars().all():
-        alert.is_resolved = True
-        alert.resolved_at = resolved_at
-        alert.resolved_by = AUTO_RESOLVE_ACTOR
+    alert_ids = list(result.scalars().all())
+    for alert_id in alert_ids:
+        await db.execute(
+            update(Alert)
+            .where(Alert.id == alert_id)
+            .values(
+                is_resolved=True,
+                resolved_at=resolved_at,
+                resolved_by=AUTO_RESOLVE_ACTOR,
+            )
+        )
 
 
 async def _get_latest_active_alert(

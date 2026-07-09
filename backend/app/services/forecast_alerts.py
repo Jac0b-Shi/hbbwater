@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1499,9 +1499,15 @@ async def _active_forecast_alerts(db: AsyncSession, sensor_id: str) -> list[Aler
 
 async def _resolve_forecast_alerts(db: AsyncSession, sensor_id: str, resolved_at: datetime) -> None:
     for alert in await _active_forecast_alerts(db, sensor_id):
-        alert.is_resolved = True
-        alert.resolved_at = resolved_at
-        alert.resolved_by = AUTO_RESOLVE_ACTOR
+        await db.execute(
+            update(Alert)
+            .where(Alert.id == alert.id)
+            .values(
+                is_resolved=True,
+                resolved_at=resolved_at,
+                resolved_by=AUTO_RESOLVE_ACTOR,
+            )
+        )
 
 
 def _build_alert_message(result: ForecastPredictionResult, sensor: Sensor) -> str:
