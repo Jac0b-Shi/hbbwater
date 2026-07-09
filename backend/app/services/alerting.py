@@ -121,6 +121,7 @@ async def _resolve_active_alerts(
                 resolved_at=resolved_at,
                 resolved_by=AUTO_RESOLVE_ACTOR,
             )
+            .execution_options(synchronize_session=False)
         )
 
 

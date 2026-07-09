@@ -18,8 +18,8 @@ try:
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.database import BusinessBase, ControlBase
-    from app.models import Alert, Sensor, Severity
+    from app.database import BusinessBase
+    from app.models import Alert, Sensor
     from app.services.alerting import AUTO_RESOLVE_ACTOR, _resolve_active_alerts
     from app.services.forecast_alerts import _resolve_forecast_alerts
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
@@ -31,31 +31,19 @@ class AlertResolutionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.business_path = Path(self.temp_dir.name) / "business.db"
-        self.control_path = Path(self.temp_dir.name) / "control.db"
         self.business_engine = create_async_engine(
             f"sqlite+aiosqlite:///{self.business_path.as_posix()}",
-            future=True,
-        )
-        self.control_engine = create_async_engine(
-            f"sqlite+aiosqlite:///{self.control_path.as_posix()}",
             future=True,
         )
         self.business_session_factory = async_sessionmaker(
             self.business_engine,
             expire_on_commit=False,
         )
-        self.control_session_factory = async_sessionmaker(
-            self.control_engine,
-            expire_on_commit=False,
-        )
         async with self.business_engine.begin() as conn:
             await conn.run_sync(BusinessBase.metadata.create_all)
-        async with self.control_engine.begin() as conn:
-            await conn.run_sync(ControlBase.metadata.create_all)
 
     async def asyncTearDown(self):
         await self.business_engine.dispose()
-        await self.control_engine.dispose()
         self.temp_dir.cleanup()
 
     async def _seed_sensor(self, session, sensor_id, sensor_type="ultrasonic"):

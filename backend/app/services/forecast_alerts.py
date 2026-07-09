@@ -1497,16 +1497,29 @@ async def _active_forecast_alerts(db: AsyncSession, sensor_id: str) -> list[Aler
     ).scalars().all()
 
 
+async def _active_forecast_alert_ids(db: AsyncSession, sensor_id: str) -> list[int]:
+    return (
+        await db.execute(
+            select(Alert.id)
+            .where(Alert.sensor_id == sensor_id)
+            .where(Alert.alert_type == AlertType.FORECAST_HIGH_WATER.value)
+            .where(Alert.is_resolved == False)
+            .order_by(desc(Alert.created_at))
+        )
+    ).scalars().all()
+
+
 async def _resolve_forecast_alerts(db: AsyncSession, sensor_id: str, resolved_at: datetime) -> None:
-    for alert in await _active_forecast_alerts(db, sensor_id):
+    for alert_id in await _active_forecast_alert_ids(db, sensor_id):
         await db.execute(
             update(Alert)
-            .where(Alert.id == alert.id)
+            .where(Alert.id == alert_id)
             .values(
                 is_resolved=True,
                 resolved_at=resolved_at,
                 resolved_by=AUTO_RESOLVE_ACTOR,
             )
+            .execution_options(synchronize_session=False)
         )
 
 
