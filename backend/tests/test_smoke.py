@@ -25,6 +25,7 @@ try:
     )
     from app.models import SensorType
     from app.routers.sensors import (
+        MAX_TIMESERIES_HOURS,
         generate_webhook_token,
         get_sensor_type_value,
         extract_device_imei,
@@ -50,6 +51,9 @@ except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
 
 @unittest.skipIf(IMPORT_ERROR is not None, f"backend dependencies unavailable: {IMPORT_ERROR}")
 class SmokeTests(unittest.TestCase):
+    def test_timeseries_range_supports_sensor_detail_options(self):
+        self.assertEqual(MAX_TIMESERIES_HOURS, 24 * 30)
+
     def test_build_gravatar_normalizes_email(self):
         gravatar = build_gravatar(" Admin@Example.COM ")
         self.assertEqual(gravatar["avatar_hash"], "e64c7d89f26bd1972efa854d13d7dd61")

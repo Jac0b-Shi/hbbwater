@@ -39,6 +39,7 @@ WEBHOOK_REPORT_METHODS = {
 
 MEASUREMENT_UNIT_CM = "cm"
 MEASUREMENT_UNIT_MM = "mm"
+MAX_TIMESERIES_HOURS = 24 * 30
 
 
 def generate_webhook_token() -> str:
@@ -738,7 +739,7 @@ async def get_sensor_readings(
 async def get_sensor_timeseries(
     sensor_id: str,
     field: str = Query("water_level", pattern="^(water_level|battery_level|signal_strength|water_detected)$"),
-    hours: int = Query(24, ge=1, le=168),
+    hours: int = Query(24, ge=1, le=MAX_TIMESERIES_HOURS),
     _: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
